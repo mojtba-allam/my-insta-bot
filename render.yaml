@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: instagram-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: USE_GOOGLE_DRIVE
+        value: "true"
+      - key: GOOGLE_DRIVE_CREDENTIALS
+        sync: false
+      - key: DATA_DIR
+        value: data
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

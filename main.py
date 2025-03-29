@@ -10,6 +10,9 @@ from telegram import Update
 from instagram_handler import InstagramHandler
 from instagram_poster import InstagramPoster
 from storage import StorageHandler
+import threading
+import http.server
+import socketserver
 
 # Load environment variables
 load_dotenv()
@@ -484,6 +487,30 @@ class InstaBot:
         logging.info("Bot starting...")
         app.run_polling()
 
+# Simple HTTP request handler for Render
+class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b'Instagram Bot is running!')
+
+def start_web_server():
+    """Start a simple web server to keep Render happy"""
+    port = int(os.getenv('PORT', 10000))
+    handler = SimpleHTTPRequestHandler
+    
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print(f"Web server running on port {port}")
+        httpd.serve_forever()
+
 if __name__ == '__main__':
+    # Start web server in a separate thread for Render
+    if os.getenv('RENDER', 'false').lower() == 'true':
+        web_thread = threading.Thread(target=start_web_server)
+        web_thread.daemon = True
+        web_thread.start()
+    
+    # Start the Telegram bot
     bot = InstaBot()
     bot.run()
