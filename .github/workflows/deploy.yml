@@ -1,0 +1,97 @@
+name: Deploy Instagram Bot
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+      # Uncomment when you have tests
+      # - name: Test with pytest
+      #   run: |
+      #     pytest
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event_name == 'workflow_dispatch'  # Only run manually
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            
+            # Login to GitHub Container Registry
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Pull latest image
+            docker pull ghcr.io/${{ github.repository }}:latest
+            
+            # Create or update .env file (if not exists)
+            if [ ! -f .env ]; then
+              echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" > .env
+              echo "USE_GOOGLE_DRIVE=true" >> .env
+              echo "GOOGLE_DRIVE_CREDENTIALS=credentials.json" >> .env
+              echo "DATA_DIR=data" >> .env
+            fi
+            
+            # Create docker-compose file if it doesn't exist
+            if [ ! -f docker-compose.yml ]; then
+              cat > docker-compose.yml << 'EOL'
+              version: '3'
+              
+              services:
+                instagram-bot:
+                  image: ghcr.io/${{ github.repository }}:latest
+                  restart: always
+                  volumes:
+                    - ./data:/app/data
+                    - ./credentials.json:/app/credentials.json
+                    - ./.env:/app/.env
+              EOL
+            fi
+            
+            # Restart the container
+            docker-compose down
+            docker-compose up -d
