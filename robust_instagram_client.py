@@ -141,13 +141,34 @@ class RobustInstagramClient(Client):
         """Get a free proxy to try"""
         try:
             import requests
-            # Try to get a free proxy from a public API
+            # Use a more reliable free proxy service
             response = requests.get('https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all', timeout=10)
             if response.status_code == 200:
                 proxies = response.text.strip().split('\n')
                 if proxies:
-                    # Format: ip:port
-                    return f"http://{random.choice(proxies)}"
+                    # Format the proxy string properly for instagrapi
+                    proxy = random.choice(proxies).strip()
+                    if proxy and ':' in proxy:
+                        # Expected format by instagrapi is http://ip:port
+                        return f"http://{proxy}"
+            
+            # Fallback to another service if the first one fails
+            response = requests.get('https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', timeout=10)
+            if response.status_code == 200:
+                proxies = response.text.strip().split('\n')
+                if proxies:
+                    proxy = random.choice(proxies).strip()
+                    if proxy and ':' in proxy:
+                        return f"http://{proxy}"
+                        
         except Exception as e:
             logger.error(f"Error getting free proxy: {str(e)}")
-        return None
+            
+        # Use a hardcoded list of reliable proxies as last resort
+        reliable_proxies = [
+            "104.223.135.178:10000",
+            "51.79.51.246:3128",
+            "20.210.113.32:8123",
+            "169.55.89.6:80"
+        ]
+        return f"http://{random.choice(reliable_proxies)}"
