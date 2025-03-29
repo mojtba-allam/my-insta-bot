@@ -1,0 +1,9 @@
+instaloader>=4.10.0
+python-telegram-bot>=20.0
+requests>=2.31.0
+APScheduler>=3.10.4
+Flask>=3.0.0
+python-dotenv>=1.0.0
+instabot>=0.117.0
+Pillow>=10.0.0
+pymongo>=4.6.0
