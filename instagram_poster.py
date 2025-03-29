@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from PIL import Image
 import time
 import random
-from robust_instagram_client import RobustInstagramClient
+from mobile_instagram_client import MobileInstagramClient
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +16,17 @@ class InstagramPoster:
     def __init__(self):
         self.client = None
         self.temp_dir = tempfile.mkdtemp()
-        
+        logger.info(f"Created temporary directory at {self.temp_dir}")
+    
     def login(self, username: str, password: str) -> bool:
         """Login to Instagram."""
         try:
-            logger.info("Initializing robust Instagram client...")
-            self.client = RobustInstagramClient()
+            logger.info("Initializing mobile Instagram client...")
+            self.client = MobileInstagramClient()
             
-            # Attempt login with our robust method
+            # Attempt login with our mobile client
             logger.info("Attempting to log in...")
-            success = self.client.robust_login(username, password)
+            success = self.client.login(username, password)
             
             if success:
                 logger.info("Successfully logged in to Instagram!")
@@ -48,113 +49,87 @@ class InstagramPoster:
         """Repost media to Instagram with attribution."""
         try:
             if not self.client:
-                raise Exception("Not logged in to Instagram")
+                logger.error("Instagram client not initialized")
+                return False
             
-            # Ensure media_path is a string, not a PosixPath
-            media_path = str(media_path) if media_path else None
-            
-            if not media_path or not os.path.exists(media_path):
-                logger.error(f"Media file not found at path: {media_path}")
-                raise Exception("Media file not found")
+            # Determine media type (photo/video)
+            is_video = media_path.lower().endswith(('.mp4', '.mov', '.avi'))
             
             # Add attribution to caption if original_url is provided
             if original_url:
-                caption = f"{caption}\n\nReposted from: {original_url}"
+                caption = f"{caption}\n\nOriginal: {original_url}"
             
-            # Check file size
-            file_size = os.path.getsize(media_path)
-            logger.info(f"Media file size: {file_size} bytes")
+            logger.info(f"Preparing to repost {'video' if is_video else 'photo'} to Instagram")
             
-            # Determine if it's a video by actual file extension
-            is_video = media_path.lower().endswith(('.mp4', '.mov'))
-            
-            # Convert image to JPEG if it's an image
-            if not is_video:
-                try:
-                    with Image.open(media_path) as img:
-                        # Create a new path with .jpg extension
-                        jpg_path = os.path.splitext(media_path)[0] + '.jpg'
-                        # Convert to RGB (in case it's RGBA)
-                        if img.mode in ('RGBA', 'LA'):
-                            background = Image.new('RGB', img.size, (255, 255, 255))
-                            background.paste(img, mask=img.split()[-1])
-                            img = background
-                        # Save as JPEG
-                        img.convert('RGB').save(jpg_path, 'JPEG', quality=95)
-                        media_path = jpg_path
-                        logger.info("Converted image to JPEG format")
-                except Exception as e:
-                    logger.error(f"Failed to convert image: {str(e)}")
-                    raise Exception(f"Failed to process image: {str(e)}")
-            
-            # Upload media
-            logger.info("Uploading to Instagram...")
             if is_video:
-                self.client.video_upload(media_path, caption=caption)
+                # For videos, create a thumbnail
+                thumbnail_path = self._create_thumbnail(media_path)
+                
+                # Upload video
+                result = self.client.upload_video(
+                    media_path,
+                    thumbnail_path,
+                    caption=caption
+                )
             else:
-                self.client.photo_upload(media_path, caption=caption)
+                # Upload photo
+                result = self.client.upload_photo(
+                    media_path,
+                    caption=caption
+                )
             
-            logger.info("Successfully reposted to Instagram!")
+            logger.info(f"Successfully reposted to Instagram! Media ID: {result.get('media_id')}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to repost: {str(e)}")
-            if self.client:
-                try:
-                    self.client.logout()
-                except:
-                    pass
-                self.client = None
-            raise
+            logger.error(f"Error reposting to Instagram: {str(e)}")
+            return False
     
-    def post_to_instagram(self, media_path: str, caption: str, original_username: Optional[str] = None) -> Dict[str, Any]:
-        """Post media to Instagram with attribution."""
+    def _create_thumbnail(self, video_path: str) -> str:
+        """Create a thumbnail from the first frame of a video."""
         try:
-            if not self.client:
-                logger.error("Attempt to post without being logged in")
-                raise Exception("Not logged in to Instagram")
+            import cv2
             
-            logger.info("Preparing image for upload...")
-            # Prepare the image (Instagram requires JPEG)
-            img = Image.open(media_path)
-            jpeg_path = os.path.join(self.temp_dir, "temp.jpg")
-            img.convert('RGB').save(jpeg_path, 'JPEG')
+            # Open the video file
+            cap = cv2.VideoCapture(video_path)
             
-            # Always add attribution at the top
-            if original_username:
-                attribution = f"created by: @{original_username}\n\n"
-                caption = attribution + caption
+            # Read the first frame
+            ret, frame = cap.read()
             
-            logger.info("Attempting to upload photo to Instagram...")
-            # Upload the photo with retry
-            for attempt in range(3):  # Try up to 3 times
-                try:
-                    self.client.photo_upload(jpeg_path, caption=caption)
-                    logger.info("Successfully posted to Instagram!")
-                    return {
-                        "success": True,
-                        "message": "Successfully posted to Instagram",
-                        "caption": caption
-                    }
-                except Exception as upload_error:
-                    logger.error(f"Upload error on attempt {attempt + 1}: {str(upload_error)}")
-                    if attempt < 2:  # Don't sleep on the last attempt
-                        time.sleep(3)  # Wait 3 seconds before retrying
+            if not ret:
+                raise Exception("Failed to read video frame")
             
-            raise Exception("Failed to upload after 3 attempts")
-                
+            # Create thumbnail path
+            thumbnail_path = os.path.join(self.temp_dir, "thumbnail.jpg")
+            
+            # Save the frame as a JPEG
+            cv2.imwrite(thumbnail_path, frame)
+            
+            # Release the video capture
+            cap.release()
+            
+            return thumbnail_path
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            logger.error(f"Error creating video thumbnail: {str(e)}")
+            
+            # Fallback: generate a black thumbnail
+            img = Image.new('RGB', (1080, 1080), color='black')
+            thumbnail_path = os.path.join(self.temp_dir, "thumbnail.jpg")
+            img.save(thumbnail_path)
+            
+            return thumbnail_path
     
-    def cleanup(self):
-        """Clean up temporary files and logout."""
-        try:
-            if self.client:
+    def __del__(self):
+        """Cleanup method."""
+        if self.client:
+            try:
                 self.client.logout()
-            if os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir)
-        except:
-            pass  # Best effort cleanup
+            except:
+                pass
+        
+        # Remove temporary directory
+        try:
+            shutil.rmtree(self.temp_dir)
+            logger.info(f"Cleaned up temporary directory: {self.temp_dir}")
+        except Exception as e:
+            logger.error(f"Error cleaning up temp directory: {str(e)}")
