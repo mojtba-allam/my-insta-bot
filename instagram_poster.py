@@ -5,6 +5,7 @@ import logging
 from typing import Dict, Any, Optional
 from instagrapi import Client
 from PIL import Image
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +19,44 @@ class InstagramPoster:
         try:
             logger.info("Initializing Instagram client...")
             self.client = Client()
-            self.client.delay_range = [2, 4]  # Slightly longer delays
-            self.client.request_timeout = 30  # Longer timeout
             
+            # Increase timeouts and delay range to handle network issues
+            self.client.delay_range = [3, 6]  # Longer delays between requests
+            self.client.request_timeout = 60  # Longer timeout (60 seconds)
+            
+            # Set a user agent to mimic a real browser - helps with login issues
+            self.client.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            
+            # Try to reuse session if available
+            session_file = f"{username.lower()}.session"
+            if os.path.exists(session_file):
+                try:
+                    logger.info(f"Found existing session file. Attempting to reuse...")
+                    self.client.load_settings(session_file)
+                    self.client.set_settings({})
+                    self.client.login(username, password)
+                except Exception as e:
+                    logger.warning(f"Failed to reuse session, creating new one: {str(e)}")
+                    if os.path.exists(session_file):
+                        os.remove(session_file)
+                    self.client = Client()
+            
+            # Standard login attempt with retry
             logger.info("Attempting to log in...")
-            self.client.login(username, password)
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                try:
+                    self.client.login(username, password)
+                    break
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(f"Login attempt {attempt} failed: {str(e)}. Retrying in 5 seconds...")
+                        time.sleep(5)
+                    else:
+                        raise
+            
+            # Save session for future use
+            self.client.dump_settings(session_file)
             
             logger.info("Successfully logged in to Instagram!")
             return True
@@ -132,7 +166,6 @@ class InstagramPoster:
                 except Exception as upload_error:
                     logger.error(f"Upload error on attempt {attempt + 1}: {str(upload_error)}")
                     if attempt < 2:  # Don't sleep on the last attempt
-                        import time
                         time.sleep(3)  # Wait 3 seconds before retrying
             
             raise Exception("Failed to upload after 3 attempts")
