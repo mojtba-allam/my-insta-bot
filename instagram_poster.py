@@ -3,54 +3,107 @@ import tempfile
 import shutil
 import logging
 from typing import Dict, Any, Optional
-from instabot import Bot
+from instagrapi import Client
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 class InstagramPoster:
     def __init__(self):
-        self.bot = None
+        self.client = None
         self.temp_dir = tempfile.mkdtemp()
         
     def login(self, username: str, password: str) -> bool:
         """Login to Instagram."""
         try:
-            logger.info("Initializing Instagram bot...")
-            # Create a new bot instance with optimized settings
-            self.bot = Bot(
-                base_path=self.temp_dir,
-                device_string="android-19.0.0",
-                save_logfile=False,
-                log_filename=None
-            )
-            
-            # Configure bot settings for faster operation
-            self.bot.api.delay_range = [1, 2]  # Minimal delays
-            self.bot.api.user_agent = 'Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/80.0.3987.119 Mobile Safari/537.36'
-            self.bot.api.timeout = 10  # 10 second timeout
+            logger.info("Initializing Instagram client...")
+            self.client = Client()
+            self.client.delay_range = [2, 4]  # Slightly longer delays
+            self.client.request_timeout = 30  # Longer timeout
             
             logger.info("Attempting to log in...")
-            # Attempt login with shorter timeout
-            success = self.bot.login(username=username, password=password, use_cookie=False)
-            
-            if not success:
-                logger.error("Login failed: Invalid credentials or Instagram blocked the request")
-                raise Exception("Invalid credentials or Instagram blocked the request")
+            self.client.login(username, password)
             
             logger.info("Successfully logged in to Instagram!")
             return True
             
         except Exception as e:
-            if self.bot:
-                self.bot.logout()
-            self.bot = None
-            raise Exception(f"Login error: {str(e)}")
+            if self.client:
+                try:
+                    self.client.logout()
+                except:
+                    pass
+                self.client = None
+            logger.error(f"Login failed: {str(e)}")
+            raise
+    
+    def repost_to_instagram(self, media_path: str, caption: str, original_url: str = '') -> bool:
+        """Repost media to Instagram with attribution."""
+        try:
+            if not self.client:
+                raise Exception("Not logged in to Instagram")
+            
+            # Ensure media_path is a string, not a PosixPath
+            media_path = str(media_path) if media_path else None
+            
+            if not media_path or not os.path.exists(media_path):
+                logger.error(f"Media file not found at path: {media_path}")
+                raise Exception("Media file not found")
+            
+            # Add attribution to caption if original_url is provided
+            if original_url:
+                caption = f"{caption}\n\nReposted from: {original_url}"
+            
+            # Check file size
+            file_size = os.path.getsize(media_path)
+            logger.info(f"Media file size: {file_size} bytes")
+            
+            # Determine if it's a video by actual file extension
+            is_video = media_path.lower().endswith(('.mp4', '.mov'))
+            
+            # Convert image to JPEG if it's an image
+            if not is_video:
+                try:
+                    with Image.open(media_path) as img:
+                        # Create a new path with .jpg extension
+                        jpg_path = os.path.splitext(media_path)[0] + '.jpg'
+                        # Convert to RGB (in case it's RGBA)
+                        if img.mode in ('RGBA', 'LA'):
+                            background = Image.new('RGB', img.size, (255, 255, 255))
+                            background.paste(img, mask=img.split()[-1])
+                            img = background
+                        # Save as JPEG
+                        img.convert('RGB').save(jpg_path, 'JPEG', quality=95)
+                        media_path = jpg_path
+                        logger.info("Converted image to JPEG format")
+                except Exception as e:
+                    logger.error(f"Failed to convert image: {str(e)}")
+                    raise Exception(f"Failed to process image: {str(e)}")
+            
+            # Upload media
+            logger.info("Uploading to Instagram...")
+            if is_video:
+                self.client.video_upload(media_path, caption=caption)
+            else:
+                self.client.photo_upload(media_path, caption=caption)
+            
+            logger.info("Successfully reposted to Instagram!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to repost: {str(e)}")
+            if self.client:
+                try:
+                    self.client.logout()
+                except:
+                    pass
+                self.client = None
+            raise
     
     def post_to_instagram(self, media_path: str, caption: str, original_username: Optional[str] = None) -> Dict[str, Any]:
         """Post media to Instagram with attribution."""
         try:
-            if not self.bot:
+            if not self.client:
                 logger.error("Attempt to post without being logged in")
                 raise Exception("Not logged in to Instagram")
             
@@ -69,15 +122,13 @@ class InstagramPoster:
             # Upload the photo with retry
             for attempt in range(3):  # Try up to 3 times
                 try:
-                    if self.bot.upload_photo(jpeg_path, caption=caption):
-                        logger.info("Successfully posted to Instagram!")
-                        return {
-                            "success": True,
-                            "message": "Successfully posted to Instagram",
-                            "caption": caption
-                        }
-                    else:
-                        logger.error(f"Upload attempt {attempt + 1} failed")
+                    self.client.photo_upload(jpeg_path, caption=caption)
+                    logger.info("Successfully posted to Instagram!")
+                    return {
+                        "success": True,
+                        "message": "Successfully posted to Instagram",
+                        "caption": caption
+                    }
                 except Exception as upload_error:
                     logger.error(f"Upload error on attempt {attempt + 1}: {str(upload_error)}")
                     if attempt < 2:  # Don't sleep on the last attempt
@@ -95,8 +146,8 @@ class InstagramPoster:
     def cleanup(self):
         """Clean up temporary files and logout."""
         try:
-            if self.bot:
-                self.bot.logout()
+            if self.client:
+                self.client.logout()
             if os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
         except:

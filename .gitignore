@@ -18,3 +18,16 @@ __pycache__/
 # Data directory
 data/
 *.json
+
+# Google Drive credentials
+credentials.json
+token.json
+service-account.json
+
+# Temporary files
+temp_*
+*.temp
+*.tmp
+
+# Logs
+*.log

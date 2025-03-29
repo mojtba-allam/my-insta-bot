@@ -1,19 +1,14 @@
-import instaloader
 import os
+import tempfile
 from typing import Dict, List, Any, Optional
+from instagrapi import Client
+from urllib.parse import urlparse
+import shutil
 
 class InstagramHandler:
     def __init__(self):
-        self.loader = instaloader.Instaloader(
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            post_metadata_txt_pattern='',
-            max_connection_attempts=3
-        )
+        self.client = None
+        self.temp_dir = tempfile.mkdtemp()
         
     def download_instagram_post(self, post_url: str, instagram_username: Optional[str] = None, instagram_password: Optional[str] = None) -> Dict[str, Any]:
         """Download an Instagram post and return its metadata."""
@@ -25,8 +20,9 @@ class InstagramHandler:
             # Clean up the URL - remove query parameters
             clean_url = post_url.split('?')[0].rstrip('/')
             
-            # Extract shortcode from URL
+            # Extract media ID from URL
             parts = clean_url.split('/')
+            media_pk = None
             
             # Find the shortcode after 'p' or 'reel'
             shortcode = None
@@ -43,27 +39,97 @@ class InstagramHandler:
                     "- instagram.com/reel/POSTID"
                 )
             
-            # Try to authenticate if credentials are provided
-            if instagram_username and instagram_password:
-                try:
-                    self.loader.login(instagram_username, instagram_password)
-                except instaloader.exceptions.InstaloaderException as e:
-                    raise Exception(f"Login failed: {str(e)}")
+            # Initialize client and login if needed
+            if not self.client:
+                self.client = Client()
+                if instagram_username and instagram_password:
+                    try:
+                        self.client.login(instagram_username, instagram_password)
+                    except Exception as e:
+                        raise Exception(f"Login failed: {str(e)}")
             
             try:
-                # Set modern user agent and additional headers
-                self.loader.context._session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Connection': 'keep-alive'
-                })
+                # Get media ID from shortcode
+                media_pk = self.client.media_pk_from_code(shortcode)
                 
-                # Set shorter timeouts
-                self.loader.context._session.timeout = 10
+                # Get media info
+                media_info = self.client.media_info(media_pk)
                 
-                post = instaloader.Post.from_shortcode(self.loader.context, shortcode)
-            except instaloader.exceptions.InstaloaderException as e:
+                # Create a unique directory for this post inside temp_dir
+                target_dir = os.path.join(self.temp_dir, f"{media_info.user.username}_{shortcode}")
+                os.makedirs(target_dir, exist_ok=True)
+                
+                media_files = []
+                
+                # Handle different media types
+                if media_info.media_type == 1:  # Photo
+                    file_path = os.path.join(target_dir, f"{shortcode}.jpg")
+                    # Download to the directory, not directly to the file path
+                    downloaded_path = self.client.photo_download(media_pk, target_dir)
+                    # Convert PosixPath to string if needed
+                    downloaded_path = str(downloaded_path) if downloaded_path else None
+                    # If downloaded path exists, use it, otherwise use our created path
+                    if downloaded_path and os.path.exists(downloaded_path):
+                        file_path = downloaded_path
+                    media_files.append({
+                        'type': 'photo',
+                        'path': file_path,
+                        'url': media_info.thumbnail_url
+                    })
+                elif media_info.media_type == 2:  # Video
+                    file_path = os.path.join(target_dir, f"{shortcode}.mp4")
+                    # Download to the directory, not directly to the file path
+                    downloaded_path = self.client.video_download(media_pk, target_dir)
+                    # Convert PosixPath to string if needed
+                    downloaded_path = str(downloaded_path) if downloaded_path else None
+                    # If downloaded path exists, use it, otherwise use our created path
+                    if downloaded_path and os.path.exists(downloaded_path):
+                        file_path = downloaded_path
+                    media_files.append({
+                        'type': 'video',
+                        'path': file_path,
+                        'url': media_info.video_url
+                    })
+                elif media_info.media_type == 8:  # Album
+                    for i, resource in enumerate(media_info.resources):
+                        if resource.media_type == 1:  # Photo in album
+                            file_path = os.path.join(target_dir, f"{shortcode}_{i}.jpg")
+                            # Download to the directory, not directly to the file path
+                            downloaded_path = self.client.photo_download(resource.pk, target_dir)
+                            # Convert PosixPath to string if needed
+                            downloaded_path = str(downloaded_path) if downloaded_path else None
+                            # If downloaded path exists, use it, otherwise use our created path
+                            if downloaded_path and os.path.exists(downloaded_path):
+                                file_path = downloaded_path
+                            media_files.append({
+                                'type': 'photo',
+                                'path': file_path,
+                                'url': resource.thumbnail_url
+                            })
+                        elif resource.media_type == 2:  # Video in album
+                            file_path = os.path.join(target_dir, f"{shortcode}_{i}.mp4")
+                            # Download to the directory, not directly to the file path
+                            downloaded_path = self.client.video_download(resource.pk, target_dir)
+                            # Convert PosixPath to string if needed
+                            downloaded_path = str(downloaded_path) if downloaded_path else None
+                            # If downloaded path exists, use it, otherwise use our created path
+                            if downloaded_path and os.path.exists(downloaded_path):
+                                file_path = downloaded_path
+                            media_files.append({
+                                'type': 'video',
+                                'path': file_path,
+                                'url': resource.video_url
+                            })
+                
+                return {
+                    "username": media_info.user.username,
+                    "caption": media_info.caption_text or "",
+                    "media_files": media_files,
+                    "download_path": target_dir,
+                    "shortcode": shortcode
+                }
+                
+            except Exception as e:
                 error_msg = str(e).lower()
                 if 'login_required' in error_msg:
                     raise Exception("This post requires authentication")
@@ -73,45 +139,19 @@ class InstagramHandler:
                     raise Exception("Instagram rate limit reached. Please try again later.")
                 else:
                     raise Exception(f"Instagram error: {str(e)}")
-            
-            # Create a unique directory for this post
-            target_dir = f"{post.owner_username}_{post.shortcode}"
-            os.makedirs(target_dir, exist_ok=True)
-            
-            # Download the post
-            self.loader.download_post(post, target=target_dir)
-            
-            # Get media files info
-            media_files = []
-            
-            # List all downloaded files
-            downloaded_files = [f for f in os.listdir(target_dir) if not f.endswith('.txt')]
-            
-            # Sort files to maintain order
-            downloaded_files.sort()
-            
-            for file in downloaded_files:
-                file_path = os.path.join(target_dir, file)
-                media_type = 'video' if file.endswith('.mp4') else 'photo'
-                
-                media_files.append({
-                    'type': media_type,
-                    'path': file_path,
-                    'url': post.video_url if media_type == 'video' else post.url
-                })
-            
-            return {
-                "username": post.owner_username,
-                "caption": post.caption or "",
-                "media_files": media_files,
-                "download_path": target_dir,
-                "shortcode": post.shortcode
-            }
-            
+                    
         except ValueError as e:
             # Re-raise validation errors as is
             raise
-        except instaloader.exceptions.InstaloaderException as e:
-            raise Exception(f"Instagram error: {str(e)}")
         except Exception as e:
             raise Exception(f"Failed to download post: {str(e)}")
+            
+    def cleanup(self):
+        """Clean up temporary files and logout."""
+        try:
+            if self.client:
+                self.client.logout()
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+        except:
+            pass  # Best effort cleanup
