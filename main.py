@@ -14,6 +14,15 @@ import threading
 import http.server
 import socketserver
 
+# Check if we're running on Render and need to set up credentials
+if os.getenv('RENDER', 'false').lower() == 'true':
+    try:
+        from render_setup import setup_credentials
+        setup_credentials()
+        print("Successfully set up credentials from environment variables")
+    except Exception as e:
+        print(f"Error setting up credentials: {e}")
+
 # Load environment variables
 load_dotenv()
 
