@@ -26,10 +26,21 @@ class RobustInstagramClient(Client):
         
         # Create sessions directory if it doesn't exist
         os.makedirs("sessions", exist_ok=True)
+        
+        # Check for proxy in environment variables
+        proxy = os.getenv("INSTAGRAM_PROXY")
+        if proxy:
+            logger.info(f"Using proxy: {proxy}")
+            self.set_proxy(proxy)
     
-    def robust_login(self, username, password, force_login=False):
+    def robust_login(self, username, password, force_login=False, use_proxy=None):
         """Login to Instagram with retries and session handling."""
         self.session_file = f"sessions/{username.lower()}.json"
+        
+        # Set proxy if provided directly
+        if use_proxy:
+            logger.info(f"Setting proxy for login: {use_proxy}")
+            self.set_proxy(use_proxy)
         
         if not force_login and os.path.exists(self.session_file) and self._try_load_session(username, password):
             logger.info(f"Successfully logged in using saved session for {username}")
@@ -43,7 +54,16 @@ class RobustInstagramClient(Client):
                 # Randomize some settings to appear more human-like
                 self.delay_range = [random.uniform(2.5, 4), random.uniform(5, 7)]
                 
-                # Set some request timeouts to avoid hanging
+                # Try different user agents on retry
+                if attempt > 1:
+                    user_agents = [
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36"
+                    ]
+                    self.user_agent = random.choice(user_agents)
+                    logger.info(f"Using user agent: {self.user_agent}")
+                
                 # Do actual login
                 super().login(username, password)
                 
@@ -57,6 +77,13 @@ class RobustInstagramClient(Client):
                 if "challenge_required" in str(e).lower():
                     logger.error("Instagram security challenge detected. Manual verification may be required.")
                     raise
+                
+                # Try with a proxy on subsequent attempts if we're on Render
+                if attempt == 2 and os.getenv('RENDER', 'false').lower() == 'true':
+                    free_proxy = self._get_free_proxy()
+                    if free_proxy:
+                        logger.info(f"Trying with free proxy: {free_proxy}")
+                        self.set_proxy(free_proxy)
                 
                 # Add random delay before retrying
                 if attempt < self.max_retries:
@@ -109,3 +136,18 @@ class RobustInstagramClient(Client):
             logger.info(f"Session saved to {self.session_file}")
         except Exception as e:
             logger.error(f"Error saving session: {str(e)}")
+    
+    def _get_free_proxy(self):
+        """Get a free proxy to try"""
+        try:
+            import requests
+            # Try to get a free proxy from a public API
+            response = requests.get('https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all', timeout=10)
+            if response.status_code == 200:
+                proxies = response.text.strip().split('\n')
+                if proxies:
+                    # Format: ip:port
+                    return f"http://{random.choice(proxies)}"
+        except Exception as e:
+            logger.error(f"Error getting free proxy: {str(e)}")
+        return None
