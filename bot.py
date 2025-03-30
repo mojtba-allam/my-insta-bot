@@ -58,15 +58,17 @@ class InstaBot:
             
         # Set up Instagram client and storage
         proxy = os.getenv('INSTAGRAM_PROXY')
-        self.instagram = InstagramManager(proxy=proxy)
         
-        # Initialize storage
-        self.use_google_drive = os.getenv('USE_GOOGLE_DRIVE', 'false').lower() == 'true'
+        # Initialize storage with Google Drive support - force it to be enabled
+        self.use_google_drive = True  # Always use Google Drive
         self.storage = StorageHandler(
             data_dir=os.getenv('DATA_DIR', 'data'),
-            use_google_drive=self.use_google_drive,
+            use_google_drive=True,  # Force Google Drive usage
             credentials_file=os.getenv('GOOGLE_DRIVE_CREDENTIALS', 'credentials.json')
         )
+        
+        # Pass storage handler to Instagram manager
+        self.instagram = InstagramManager(proxy=proxy, storage_handler=self.storage)
         
         # Keep track of logged in users
         self.logged_in_users = set()

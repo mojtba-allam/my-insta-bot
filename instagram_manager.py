@@ -21,14 +21,16 @@ class InstagramManager:
     Combined Instagram handler class for downloading and posting content.
     """
     
-    def __init__(self, proxy=None):
+    def __init__(self, proxy=None, storage_handler=None):
         """
         Initialize the Instagram handler and poster.
         
         Args:
             proxy (str, optional): Proxy URL for requests.
+            storage_handler: Storage handler for saving data to Google Drive
         """
-        self.client = MobileInstagramClient(proxy=proxy)
+        self.client = MobileInstagramClient(proxy=proxy, storage_handler=storage_handler)
+        self.storage_handler = storage_handler
         self.is_logged_in = False
         self.username = None
         self.post_data = {}
@@ -269,6 +271,24 @@ class InstagramManager:
         # Download the file
         response = requests.get(url, stream=True)
         if response.status_code == 200:
+            # If we have a storage handler, save directly to Google Drive
+            if self.storage_handler and self.storage_handler.use_google_drive:
+                file_name = f"{post_id}.{ext}"
+                file_data = response.content
+                
+                try:
+                    # Save to Google Drive
+                    mime_type = "image/jpeg" if ext == "jpg" else "video/mp4"
+                    self.storage_handler.google_drive.upload_file_data(
+                        file_name=file_name,
+                        file_data=file_data,
+                        mime_type=mime_type
+                    )
+                    logger.info(f"Media saved to Google Drive: {file_name}")
+                except Exception as e:
+                    logger.error(f"Error saving media to Google Drive: {str(e)}")
+            
+            # Also save locally as a fallback/cache
             with open(local_path, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)

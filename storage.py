@@ -238,3 +238,87 @@ class StorageHandler:
                 success = False
                 
         return success
+    
+    def save_instagram_session(self, username, session_data):
+        """
+        Save Instagram session data to storage.
+        
+        Args:
+            username: Instagram username
+            session_data: Serializable session data
+        
+        Returns:
+            bool: Success or failure
+        """
+        try:
+            if not username:
+                logger.error("Cannot save session with empty username")
+                return False
+                
+            # Pickle the session data
+            import pickle
+            session_bytes = pickle.dumps(session_data)
+            
+            file_name = f"{username.lower()}_session.pkl"
+            file_path = os.path.join(self.data_dir, file_name)
+            
+            if self.use_google_drive:
+                # Save to Google Drive
+                logger.info(f"Saving Instagram session for {username} to Google Drive")
+                self.google_drive.upload_file_data(
+                    file_name=file_name,
+                    file_data=session_bytes, 
+                    mime_type="application/octet-stream"
+                )
+            else:
+                # Save locally
+                logger.info(f"Saving Instagram session for {username} locally")
+                # Ensure directory exists
+                os.makedirs(self.data_dir, exist_ok=True)
+                with open(file_path, 'wb') as f:
+                    f.write(session_bytes)
+                    
+            return True
+        except Exception as e:
+            logger.error(f"Error saving Instagram session: {str(e)}")
+            return False
+    
+    def load_instagram_session(self, username):
+        """
+        Load Instagram session data from storage.
+        
+        Args:
+            username: Instagram username
+        
+        Returns:
+            object: Session data or None if not found
+        """
+        try:
+            if not username:
+                logger.error("Cannot load session with empty username")
+                return None
+                
+            file_name = f"{username.lower()}_session.pkl"
+            file_path = os.path.join(self.data_dir, file_name)
+            
+            session_bytes = None
+            
+            if self.use_google_drive:
+                # Load from Google Drive
+                logger.info(f"Loading Instagram session for {username} from Google Drive")
+                session_bytes = self.google_drive.download_file_by_name(file_name)
+            elif os.path.exists(file_path):
+                # Load locally
+                logger.info(f"Loading Instagram session for {username} locally")
+                with open(file_path, 'rb') as f:
+                    session_bytes = f.read()
+            
+            if session_bytes:
+                # Unpickle the session data
+                import pickle
+                return pickle.loads(session_bytes)
+                
+            return None
+        except Exception as e:
+            logger.error(f"Error loading Instagram session: {str(e)}")
+            return None

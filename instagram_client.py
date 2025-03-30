@@ -21,20 +21,22 @@ class MobileInstagramClient:
     Handles login, session management, and content upload.
     """
     
-    def __init__(self, proxy=None):
+    def __init__(self, proxy=None, storage_handler=None):
         """
         Initialize the client.
         
         Args:
             proxy (str, optional): Proxy URL for requests. Format: 'http://user:pass@ip:port'
+            storage_handler: Storage handler for saving sessions (uses Google Drive if configured)
         """
         self.api = None
         self.is_logged_in = False
         self.username = None
         self.device_id = None
         self.proxy = proxy
+        self.storage_handler = storage_handler
         
-        # Create sessions directory if it doesn't exist
+        # Create sessions directory if it doesn't exist (fallback only)
         os.makedirs("sessions", exist_ok=True)
     
     def _generate_device_id(self, username, password):
@@ -52,32 +54,45 @@ class MobileInstagramClient:
         session_file = f"sessions/{username.lower()}_mobile.pkl"
         
         # Try to reuse cached session if it exists and we're not forcing login
-        if not force_login and os.path.exists(session_file):
+        cached_settings = None
+        
+        if not force_login:
             try:
                 logger.info(f"Attempting to use cached session for {username}")
-                with open(session_file, "rb") as f:
-                    cached_settings = pickle.load(f)
                 
-                # Create client with cached settings
-                self.api = Client(
-                    username,
-                    password,
-                    settings=cached_settings,
-                )
+                # Try to get session from storage handler first (Google Drive)
+                if self.storage_handler:
+                    cached_settings = self.storage_handler.load_instagram_session(username)
+                    if cached_settings:
+                        logger.info(f"Loaded session from storage handler for {username}")
                 
-                # Verify connectivity with a basic request
-                try:
-                    # Test connection with a lightweight API call
-                    self.api.get_client_settings()
-                    logger.info(f"Successfully logged in using cached session for {username}")
-                    self.is_logged_in = True
-                    return True
-                except Exception as conn_error:
-                    if "temporary failure in name resolution" in str(conn_error).lower():
-                        logger.error(f"Network connectivity issue detected: {str(conn_error)}")
-                        raise Exception("network_error: Instagram servers cannot be reached. Check your internet connection and try again later.")
-                    logger.warning(f"Cached session failed verification: {str(conn_error)}")
-                    # Continue to fresh login
+                # Fallback to local file if storage handler not available or session not found
+                if not cached_settings and os.path.exists(session_file):
+                    with open(session_file, "rb") as f:
+                        cached_settings = pickle.load(f)
+                    logger.info(f"Loaded session from local file for {username}")
+                
+                if cached_settings:
+                    # Create client with cached settings
+                    self.api = Client(
+                        username,
+                        password,
+                        settings=cached_settings,
+                    )
+                    
+                    # Verify connectivity with a basic request
+                    try:
+                        # Test connection with a lightweight API call
+                        self.api.get_client_settings()
+                        logger.info(f"Successfully logged in using cached session for {username}")
+                        self.is_logged_in = True
+                        return True
+                    except Exception as conn_error:
+                        if "temporary failure in name resolution" in str(conn_error).lower():
+                            logger.error(f"Network connectivity issue detected: {str(conn_error)}")
+                            raise Exception("network_error: Instagram servers cannot be reached. Check your internet connection and try again later.")
+                        logger.warning(f"Cached session failed verification: {str(conn_error)}")
+                        # Continue to fresh login
             except Exception as e:
                 logger.warning(f"Failed to use cached session: {str(e)}")
                 if os.path.exists(session_file):
@@ -116,8 +131,15 @@ class MobileInstagramClient:
                     logger.info(f"Successfully logged in as {username}")
                     
                     # Cache the session settings
-                    with open(session_file, "wb") as f:
-                        pickle.dump(self.api.settings, f)
+                    if self.storage_handler:
+                        # Save to Google Drive via storage handler
+                        self.storage_handler.save_instagram_session(username, self.api.settings)
+                        logger.info(f"Saved session to storage handler for {username}")
+                    else:
+                        # Fallback to local file if storage handler not available
+                        with open(session_file, "wb") as f:
+                            pickle.dump(self.api.settings, f)
+                        logger.info(f"Saved session to local file for {username}")
                     
                     self.is_logged_in = True
                     return True
