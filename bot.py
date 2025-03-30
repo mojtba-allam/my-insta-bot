@@ -161,7 +161,7 @@ class InstaBot:
                 elif "challenge_required" in error_msg:
                     await update.message.reply_text(
                         "❌ Login requires verification.\n"
-                        "Please log in to Instagram app and approve the login request."
+                        "Please login to your Instagram account through the app or website first to complete any security verifications, then try again."
                     )
                     return ConversationHandler.END
                 else:
@@ -534,31 +534,6 @@ class InstaBot:
         
         app.add_error_handler(self.error_handler)
 
-    def run(self):
-        """Start the bot."""
-        # Create application instance
-        app = Application.builder().token(self.token).concurrent_updates(True).build()
-        
-        # Explicitly delete webhook to avoid conflicts
-        logger.info("Deleting any existing webhook...")
-        try:
-            import requests
-            response = requests.get(f"https://api.telegram.org/bot{self.token}/deleteWebhook?drop_pending_updates=true")
-            logger.info(f"Webhook deletion response: {response.json()}")
-        except Exception as e:
-            logger.error(f"Error deleting webhook: {e}")
-        
-        # Register handlers
-        self.register_handlers(app)
-        
-        # Set up bot commands menu
-        app.create_task(self.set_commands(app))
-        
-        # Start the bot
-        print("Bot starting...")
-        logging.info("Bot starting...")
-        app.run_polling(poll_interval=1.0)
-        
     async def run_async(self):
         """Start the bot asynchronously."""
         # Create application instance
@@ -599,7 +574,67 @@ class InstaBot:
             await app.stop()
             await app.updater.stop()
             await app.shutdown()
+            
+    async def setup_webhook(self, webhook_url):
+        """Set up webhook mode for the bot."""
+        # Create application instance
+        app = Application.builder().token(self.token).concurrent_updates(True).build()
+        
+        # Register handlers
+        self.register_handlers(app)
+        
+        # Set up bot commands menu - properly await the coroutine
+        await self.set_commands(app)
+        
+        # Set webhook
+        await app.bot.set_webhook(webhook_url)
+        
+        # Initialize the app (but don't start polling)
+        await app.initialize()
+        await app.start()
+        
+        logger.info(f"Bot webhook set to {webhook_url}")
+        return app
     
+    async def process_update(self, update_json):
+        """Process a single update from the webhook."""
+        if not hasattr(self, '_app'):
+            # Create application instance if not already created
+            self._app = Application.builder().token(self.token).concurrent_updates(True).build()
+            # Register handlers
+            self.register_handlers(self._app)
+            # Initialize the app
+            await self._app.initialize()
+            await self._app.start()
+        
+        # Process the update
+        await self._app.process_update(Update.de_json(update_json, self._app.bot))
+
+    def run(self):
+        """Start the bot."""
+        # Create application instance
+        app = Application.builder().token(self.token).concurrent_updates(True).build()
+        
+        # Explicitly delete webhook to avoid conflicts
+        logger.info("Deleting any existing webhook...")
+        try:
+            import requests
+            response = requests.get(f"https://api.telegram.org/bot{self.token}/deleteWebhook?drop_pending_updates=true")
+            logger.info(f"Webhook deletion response: {response.json()}")
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
+        
+        # Register handlers
+        self.register_handlers(app)
+        
+        # Set up bot commands menu
+        app.create_task(self.set_commands(app))
+        
+        # Start the bot
+        print("Bot starting...")
+        logging.info("Bot starting...")
+        app.run_polling(poll_interval=1.0)
+        
     def _load_stored_credentials(self):
         """Load stored credentials from storage."""
         try:
