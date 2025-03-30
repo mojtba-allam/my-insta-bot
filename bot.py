@@ -17,6 +17,8 @@ import threading
 import http.server
 import socketserver
 import asyncio
+import re
+from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
 # Load environment variables
 load_dotenv()
@@ -69,7 +71,7 @@ class InstaBot:
         )
         
         # Pass storage handler to Instagram manager
-        self.instagram = InstagramManager(proxy=proxy, storage_handler=self.storage)
+        self.instagram_manager = InstagramManager(proxy=proxy, storage_handler=self.storage)
         
         # Keep track of logged in users
         self.logged_in_users = set()
@@ -98,82 +100,169 @@ class InstaBot:
         )
         return WAITING_FOR_USERNAME
     
-    async def process_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Process the Instagram URL and download the post."""
+    async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle Instagram URLs sent to the bot.
+        
+        This method downloads the Instagram post and sends it to the user.
+        """
+        user_id = update.effective_user.id
+        
+        # Check if URL is in message text
+        message_text = update.message.text.strip()
+        
+        # Log the received URL
+        logger.info(f"Received Instagram URL: {message_text}")
+        
+        if not self._is_instagram_url(message_text):
+            await update.message.reply_text("That doesn't look like an Instagram URL. Please send a valid Instagram post URL.")
+            return
+        
+        # Send downloading message
+        downloading_message = await update.message.reply_text("⏳ Downloading post...")
+        
         try:
-            user_id = update.effective_user.id
+            # Get the Instagram credentials
+            username = self.user_sessions.get(user_id, {}).get('username')
+            password = self.user_sessions.get(user_id, {}).get('password')
             
-            # Check if user is logged in
-            if user_id not in self.logged_in_users:
+            if not username or not password:
                 await update.message.reply_text(
-                    "❌ You need to log in first.\n"
-                    "Please use /start to log in."
+                    "You need to log in to Instagram first. Use /start to log in."
                 )
-                return ConversationHandler.END
+                return
             
-            post_url = update.message.text
-            context.user_data['post_url'] = post_url
-            await update.message.reply_text("⏳ Downloading post...")
-            
+            # Try to download the post directly without using Telegram's media_id parsing
             try:
-                # Get session if available
-                session = self.user_sessions.get(user_id)
-                username = session['username'] if session else None
-                password = session['password'] if session else None
+                # Extract shortcode from URL to avoid any URL parsing issues
+                shortcode_match = re.search(r'instagram\.com\/p\/([^\/\?]+)', message_text)
+                if not shortcode_match:
+                    await update.message.reply_text("Could not extract post ID from URL. Please make sure it's a valid Instagram post URL.")
+                    return
                 
-                # Try downloading with current session if available
-                post_data = self.instagram.download_instagram_post(
-                    post_url,
-                    instagram_username=username,
-                    instagram_password=password
-                )
+                shortcode = shortcode_match.group(1)
+                logger.info(f"Extracted shortcode: {shortcode}")
                 
-                context.user_data['post_data'] = post_data
+                # Download the post directly using the Instagram manager
+                post_data = self.instagram_manager.download_instagram_post(message_text, username, password)
                 
-                # If successful, ask for new caption
-                await update.message.reply_text(
-                    f"✅ Downloaded post from @{post_data['username']}\n\n"
-                    f"Original caption:\n{post_data['caption']}\n\n"
-                    "Please send me the new caption for reposting."
-                )
-                return WAITING_FOR_CAPTION
+                # Process the downloaded post data
+                caption = post_data.get('caption', 'Instagram Post')
+                media_files = post_data.get('media_files', [])
+                user_info = post_data.get('user_info', {})
                 
-            except ValueError as e:
-                # Handle validation errors (invalid URL, post not found)
-                await update.message.reply_text(f"❌ {str(e)}")
-                return WAITING_FOR_URL
+                if not media_files:
+                    raise ValueError("No media found in this post")
+                
+                # Send the media files
+                await self._send_media_files(update, media_files, caption, user_info)
+                
+                # Edit the downloading message to indicate success
+                await downloading_message.edit_text("✅ Download complete!")
                 
             except Exception as e:
-                error_msg = str(e).lower()
-                if "login required" in error_msg or "login_required" in error_msg:
-                    await update.message.reply_text(
-                        "🔐 This post requires authentication.\n"
-                        "Please provide your Instagram credentials.\n\n"
-                        "First, send your Instagram username:"
-                    )
-                    return WAITING_FOR_USERNAME
-                elif "rate limit" in error_msg:
-                    await update.message.reply_text(
-                        "⏳ Instagram rate limit reached.\n"
-                        "Please wait a few minutes and try again."
-                    )
-                    return ConversationHandler.END
-                elif "challenge_required" in error_msg:
-                    await update.message.reply_text(
-                        "❌ Login requires verification.\n"
-                        "Please login to your Instagram account through the app or website first to complete any security verifications, then try again."
-                    )
-                    return ConversationHandler.END
-                else:
-                    await update.message.reply_text(
-                        f"❌ Error: {str(e)}\n"
-                        "Please try again or contact support if the issue persists."
-                    )
-                    return WAITING_FOR_URL
-            
+                # Log the error
+                logger.error(f"Error downloading post: {str(e)}")
+                
+                # Inform the user
+                await downloading_message.edit_text(
+                    f"❌ Error: {str(e)}\n"
+                    "Please try again or contact support if the issue persists."
+                )
+                
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {str(e)}\nPlease try again with a valid Instagram post URL.")
-            return WAITING_FOR_URL
+            logger.error(f"Error in handle_instagram_url: {str(e)}")
+            await downloading_message.edit_text(
+                f"❌ Error: {str(e)}\n"
+                "Please try again or contact support if the issue persists."
+            )
+    
+    async def _send_media_files(self, update, media_files, caption, user_info):
+        """
+        Send downloaded media files to the chat.
+        
+        Args:
+            update (Update): Telegram update object
+            media_files (list): List of media file paths
+            caption (str): Caption for the media
+            user_info (dict): Information about the Instagram user
+        """
+        if not media_files:
+            await update.message.reply_text("No media files to send.")
+            return
+        
+        # Format caption with attribution
+        formatted_caption = f"📸 *Instagram Post*\n"
+        if user_info and user_info.get('username'):
+            formatted_caption += f"👤 @{user_info['username']}\n\n"
+        
+        formatted_caption += self._escape_markdown(caption[:1000] if caption else "")  # Limit caption length
+        
+        # If there's only one file, send it directly
+        if len(media_files) == 1:
+            file_path = media_files[0]
+            
+            # Check if it's an image or video
+            if file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+                await update.message.reply_photo(
+                    photo=open(file_path, 'rb'),
+                    caption=formatted_caption,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            elif file_path.lower().endswith(('.mp4', '.mov')):
+                await update.message.reply_video(
+                    video=open(file_path, 'rb'),
+                    caption=formatted_caption,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            else:
+                await update.message.reply_document(
+                    document=open(file_path, 'rb'),
+                    caption=formatted_caption,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+        else:
+            # For multiple files, we need to send a media group
+            # First send the caption separately as media groups have limited caption support
+            await update.message.reply_text(
+                formatted_caption,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+            # Prepare media group
+            media = []
+            for file_path in media_files[:10]:  # Telegram limits to 10 files per group
+                if file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    media.append(InputMediaPhoto(media=open(file_path, 'rb')))
+                elif file_path.lower().endswith(('.mp4', '.mov')):
+                    media.append(InputMediaVideo(media=open(file_path, 'rb')))
+                else:
+                    media.append(InputMediaDocument(media=open(file_path, 'rb')))
+            
+            # Send the media group
+            await update.message.reply_media_group(media=media)
+    
+    def _escape_markdown(self, text):
+        """Escape Markdown special characters for Telegram's MARKDOWN_V2 mode."""
+        if not text:
+            return ""
+        
+        # Characters that need to be escaped in MARKDOWN_V2
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        
+        # Escape each special character with a backslash
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        
+        return text
+    
+    def _is_instagram_url(self, text):
+        """Check if the given text is an Instagram URL."""
+        # Handle both www and non-www versions, as well as new Instagram URL formats
+        instagram_pattern = re.compile(
+            r'https?://(?:www\.)?instagram\.com/(?:p|reel)/[a-zA-Z0-9_-]+/?(?:\?.*)?$'
+        )
+        return bool(instagram_pattern.match(text))
     
     async def process_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Process Instagram username for downloading."""
@@ -210,7 +299,7 @@ class InstaBot:
             
             try:
                 # Attempt to log in to Instagram
-                success = self.instagram.login(username, password)
+                success = self.instagram_manager.login(username, password)
                 
                 if success:
                     # Store user info in the user_data
@@ -311,7 +400,8 @@ class InstaBot:
             await update.message.reply_text("⏳ Reposting to Instagram...")
             
             try:
-                result = self.instagram.repost_to_instagram(
+                # Attempt to repost to Instagram
+                result = self.instagram_manager.repost_to_instagram(
                     post_data['local_path'],
                     new_caption,
                     post_data['original_url']
@@ -366,7 +456,7 @@ class InstaBot:
             self.storage.delete_credentials(user_id)
             
             # Logout from Instagram
-            self.instagram.logout()
+            self.instagram_manager.logout()
             
             await update.message.reply_text(
                 "✅ You have been logged out of your Instagram account.\n\n"
@@ -441,9 +531,9 @@ class InstaBot:
         # Attempt to get additional account info if possible
         account_info = "No additional account information available."
         try:
-            if hasattr(self.instagram, 'client') and self.instagram.is_logged_in and self.instagram.username == username:
+            if hasattr(self.instagram_manager, 'client') and self.instagram_manager.is_logged_in and self.instagram_manager.username == username:
                 # Try to get basic account info
-                user_info = self.instagram.client.api.username_info(username)
+                user_info = self.instagram_manager.client.api.username_info(username)
                 if user_info and 'user' in user_info:
                     user = user_info['user']
                     account_info = (
@@ -505,7 +595,7 @@ class InstaBot:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_password)
                 ],
                 WAITING_FOR_URL: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_url),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_instagram_url),
                     CommandHandler('logout', self.logout),
                     CommandHandler('whoami', self.whoami),
                 ],
