@@ -601,15 +601,31 @@ class InstaBot:
         if not hasattr(self, '_app'):
             # Create application instance if not already created
             self._app = Application.builder().token(self.token).concurrent_updates(True).build()
+            
+            # Set application attribute to save conversations
+            self._app.bot_data['instagram_bot'] = self
+            
             # Register handlers
             self.register_handlers(self._app)
+            
             # Initialize the app
             await self._app.initialize()
             await self._app.start()
+            
+            logger.info("Application initialized for webhook processing")
+        
+        # Create update object
+        update = Update.de_json(update_json, self._app.bot)
+        
+        # Log the update for debugging
+        logger.debug(f"Processing update: {update.update_id}")
         
         # Process the update
-        await self._app.process_update(Update.de_json(update_json, self._app.bot))
-
+        await self._app.process_update(update)
+        
+        # Log completion
+        logger.debug(f"Completed processing update: {update.update_id}")
+        
     def run(self):
         """Start the bot."""
         # Create application instance

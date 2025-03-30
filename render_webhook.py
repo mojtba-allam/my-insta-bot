@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import base64
 from flask import Flask, request, Response
 from threading import Thread
+from queue import Queue
+from telegram import Update
 
 # Set up logging
 logging.basicConfig(
@@ -20,6 +22,12 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app for webhook handling
 app = Flask(__name__)
+
+# Configuration for persistent storage with Flask
+app.config['CONVERSATION_PERSISTENCE'] = True
+
+# Create a global application instance
+APP_INSTANCE = None
 BOT_INSTANCE = None
 
 # Function to create credentials file from base64 string if provided
@@ -41,7 +49,7 @@ def setup_credentials():
 
 async def setup_bot():
     """Set up and initialize the bot."""
-    global BOT_INSTANCE
+    global BOT_INSTANCE, APP_INSTANCE
     
     # Get token from environment or use default
     token = os.getenv('TELEGRAM_TOKEN', "").strip()
@@ -60,11 +68,32 @@ async def setup_bot():
     # Create a bot instance
     BOT_INSTANCE = InstaBot(token=token)
     
-    # Set webhook
-    await BOT_INSTANCE.setup_webhook(webhook_url)
+    # Set up the application with the webhook
+    APP_INSTANCE = await BOT_INSTANCE.setup_webhook(webhook_url)
     
     logger.info(f"Bot initialized with webhook at {webhook_url}")
     return BOT_INSTANCE
+
+# Use a queue for processing updates to avoid concurrency issues
+update_queue = Queue()
+
+def process_update_worker():
+    """Worker thread to process updates from the queue."""
+    while True:
+        try:
+            update_json, token = update_queue.get()
+            if update_json:
+                # Process the update
+                asyncio.run(APP_INSTANCE.process_update(
+                    Update.de_json(update_json, APP_INSTANCE.bot)
+                ))
+            update_queue.task_done()
+        except Exception as e:
+            logger.error(f"Error processing update: {e}")
+
+# Start worker thread
+worker_thread = Thread(target=process_update_worker, daemon=True)
+worker_thread.start()
 
 @app.route('/')
 def index():
@@ -79,9 +108,13 @@ def webhook(token):
         return Response("Unauthorized", status=403)
     
     # Process update
-    if BOT_INSTANCE:
+    if APP_INSTANCE:
         update_json = request.get_json()
-        asyncio.run(BOT_INSTANCE.process_update(update_json))
+        logger.debug(f"Received update: {update_json.get('update_id', 'unknown')}")
+        
+        # Add to queue for processing
+        update_queue.put((update_json, token))
+        
         return Response("OK", status=200)
     
     return Response("Bot not initialized", status=500)
