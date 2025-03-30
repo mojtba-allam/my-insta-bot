@@ -1,5 +1,5 @@
 instagram-private-api==1.6.0.0
-python-telegram-bot>=20.0
+python-telegram-bot>=20.0a0
 requests>=2.31.0
 APScheduler>=3.10.4
 Flask>=3.0.0

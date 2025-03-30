@@ -1,3 +1,6 @@
+"""
+Streamlined Telegram Bot for Instagram downloading and reposting.
+"""
 import os
 import logging
 from datetime import datetime
@@ -8,21 +11,11 @@ from telegram.ext import (
 )
 from telegram import Update
 from telegram.constants import ParseMode
-from instagram_handler import InstagramHandler
-from instagram_poster import InstagramPoster
+from instagram_manager import InstagramManager
 from storage import StorageHandler
 import threading
 import http.server
 import socketserver
-
-# Check if we're running on Render and need to set up credentials
-if os.getenv('RENDER', 'false').lower() == 'true':
-    try:
-        from render_setup import setup_credentials
-        setup_credentials()
-        print("Successfully set up credentials from environment variables")
-    except Exception as e:
-        print(f"Error setting up credentials: {e}")
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +23,7 @@ load_dotenv()
 # Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Changed to DEBUG level
+    level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -41,7 +34,7 @@ logger.addHandler(console_handler)
 
 # States
 (WAITING_FOR_URL, WAITING_FOR_USERNAME, WAITING_FOR_PASSWORD,
- WAITING_FOR_CAPTION, WAITING_FOR_REPOST_USERNAME, WAITING_FOR_REPOST_PASSWORD) = range(6)
+ WAITING_FOR_CAPTION) = range(4)
 
 class InstaBot:
     """
@@ -63,11 +56,11 @@ class InstaBot:
         if not self.token:
             raise ValueError("TELEGRAM_TOKEN environment variable not set")
             
-        # Set up storage and user sessions
-        self.instagram = InstagramHandler()
-        self.poster = InstagramPoster()
+        # Set up Instagram client and storage
+        proxy = os.getenv('INSTAGRAM_PROXY')
+        self.instagram = InstagramManager(proxy=proxy)
         
-        # Initialize storage with Google Drive support
+        # Initialize storage
         self.use_google_drive = os.getenv('USE_GOOGLE_DRIVE', 'false').lower() == 'true'
         self.storage = StorageHandler(
             data_dir=os.getenv('DATA_DIR', 'data'),
@@ -192,129 +185,19 @@ class InstaBot:
             "🔒 For your security, I'll delete your credentials immediately after use."
         )
         return WAITING_FOR_PASSWORD
-        
-    async def process_repost_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Process Instagram username for reposting."""
-        username = update.message.text
-        context.user_data['instagram_username'] = username
-        context.user_data['login_in_progress'] = True
-        
-        await update.message.reply_text(
-            "🔑 Please send your Instagram password.\n"
-            "Your credentials will be securely stored for future use."
-        )
-        return WAITING_FOR_REPOST_PASSWORD
-        
-    async def process_repost_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Process Instagram password and attempt to repost."""
-        try:
-            password = update.message.text
-            username = context.user_data.get('instagram_username')
-            user_id = update.effective_user.id
-            
-            # Delete the message containing the password immediately
-            await update.message.delete()
-            
-            if not username or not context.user_data.get('login_in_progress'):
-                await update.message.reply_text("❌ Invalid login attempt. Please use /start to begin.")
-                return ConversationHandler.END
-            
-            await update.message.reply_text("🔄 Logging in to Instagram...")
-            
-            try:
-                # Try to login
-                self.poster.login(username, password)
-                
-                # Store the session
-                self.logged_in_users.add(user_id)
-                self.user_sessions[user_id] = {
-                    'username': username,
-                    'password': password
-                }
-                
-                # Save credentials to storage
-                self.storage.save_credentials(user_id, username, password)
-                
-                # Clear login flag
-                context.user_data['login_in_progress'] = False
-                
-                # Get repost data
-                repost_data = context.user_data.get('repost_data', {})
-                if not repost_data:
-                    await update.message.reply_text(
-                        "✅ Successfully logged in!\n\n"
-                        "Now you can send me Instagram post URLs to repost them."
-                    )
-                    return WAITING_FOR_URL
-                
-                await update.message.reply_text("⏳ Reposting to Instagram...")
-                
-                # Get media path and caption
-                media_path = repost_data.get('media_path')
-                caption = repost_data.get('caption')
-                original_url = repost_data.get('original_url', '')
-                
-                if not media_path or not caption:
-                    raise Exception("Missing media path or caption")
-                
-                # Attempt to repost
-                success = self.poster.repost_to_instagram(
-                    media_path=media_path,
-                    caption=caption,
-                    original_url=original_url
-                )
-                
-                if success:
-                    await update.message.reply_text(
-                        "✅ Successfully reposted to Instagram!\n"
-                        "Send another URL to repost more content."
-                    )
-                    return WAITING_FOR_URL
-                else:
-                    logging.error("Instagram posting returned False")
-                    await update.message.reply_text(
-                        "❌ Failed to post to Instagram. Check logs for details.\n"
-                        "You can try again by sending another URL."
-                    )
-                    return WAITING_FOR_URL
-                    
-            except Exception as e:
-                logging.error(f"Exception during Instagram posting: {str(e)}", exc_info=True)
-                await update.message.reply_text(
-                    f"❌ Error: {str(e)}\n"
-                    "Please try again with /start"
-                )
-                return ConversationHandler.END
-                
-        except Exception as e:
-            await update.message.reply_text(
-                "❌ An error occurred. Please try again with /start"
-            )
-            return ConversationHandler.END
-            
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-        
-        # Clean up
-        self.poster.cleanup()
-        
-        # Clear sensitive data
-        if 'instagram_username' in context.user_data:
-            del context.user_data['instagram_username']
-        if 'repost_data' in context.user_data:
-            del context.user_data['repost_data']
-        
-        return ConversationHandler.END
     
     async def process_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Process Instagram password for initial login."""
+        """Process Instagram password and try to log in."""
         # Delete the message containing the password for security
-        await update.message.delete()
+        try:
+            await update.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete password message: {e}")
         
         try:
-            password = update.message.text
-            username = context.user_data.get('instagram_username')
             user_id = update.effective_user.id
+            username = context.user_data.get('instagram_username')
+            password = update.message.text
             
             if not username:
                 await update.message.reply_text("❌ Session expired. Please start over with /start")
@@ -324,7 +207,7 @@ class InstaBot:
             
             try:
                 # Attempt to log in to Instagram
-                success = self.poster.login(username, password)
+                success = self.instagram.login(username, password)
                 
                 if success:
                     # Store user info in the user_data
@@ -335,6 +218,15 @@ class InstaBot:
                     
                     # Add user to logged in users
                     self.logged_in_users.add(user_id)
+                    
+                    # Save credentials in user_sessions
+                    self.user_sessions[user_id] = {
+                        'username': username,
+                        'password': password
+                    }
+                    
+                    # Save to storage
+                    self.storage.save_credentials(user_id, username, password)
                     
                     await update.message.reply_text(
                         f"✅ Successfully logged in as {username}!\n\n"
@@ -381,123 +273,97 @@ class InstaBot:
             
         except Exception as e:
             # Clear sensitive data
-            context.user_data.pop('instagram_username', None)
+            if 'instagram_password' in context.user_data:
+                del context.user_data['instagram_password']
             
-            await update.message.reply_text(
-                f"❌ Authentication failed: {str(e)}\n"
-                "Please try again with /start"
-            )
+            await update.message.reply_text(f"❌ Error during login: {str(e)}\nPlease try again with /start")
             return ConversationHandler.END
     
     async def process_caption(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Save the new caption and prepare for reposting."""
+        """Process the caption and repost to Instagram."""
         try:
-            new_caption = update.message.text
-            post_data = context.user_data.get('post_data')
             user_id = update.effective_user.id
             
-            if not post_data:
-                await update.message.reply_text("❌ Session expired. Please start over with /start")
-                return ConversationHandler.END
-            
-            # Store caption and post data for later
-            try:
-                # Get the first media file path
-                media_files = post_data.get('media_files', [])
-                if not media_files:
-                    raise KeyError("No media files found")
-                    
-                media_path = media_files[0]['path']
-                original_url = post_data.get('original_url', '')
-                
-                if not os.path.exists(media_path):
-                    await update.message.reply_text(
-                        "❌ Error: Media file not found.\n"
-                        "Please try downloading the post again."
-                    )
-                    return ConversationHandler.END
-                    
-                # Store repost data
-                context.user_data['repost_data'] = {
-                    'caption': new_caption,
-                    'media_path': media_path,
-                    'original_url': original_url
-                }
-            except (KeyError, IndexError) as e:
+            # Check if user is logged in
+            if user_id not in self.logged_in_users:
                 await update.message.reply_text(
-                    "❌ Error: Could not find downloaded media.\n"
-                    "Please try downloading the post again."
+                    "❌ You need to log in first.\n"
+                    "Please use /start to log in."
                 )
-                logger.error(f"Failed to process media: {str(e)}")
                 return ConversationHandler.END
             
-            # Check if user is already logged in
-            if user_id in self.logged_in_users:
-                session = self.user_sessions.get(user_id)
-                if session:
-                    await update.message.reply_text("⏳ Reposting to Instagram...")
-                    try:
-                        # Ensure we're logged in with current session
-                        self.poster.login(session['username'], session['password'])
-                        
-                        # Attempt to repost
-                        success = self.poster.repost_to_instagram(
-                            media_path,
-                            new_caption,
-                            original_url
-                        )
-                        
-                        if success:
-                            await update.message.reply_text(
-                                "✅ Successfully reposted to Instagram!\n"
-                                "Send another URL to repost more content."
-                            )
-                            return WAITING_FOR_URL
-                        else:
-                            logging.error("Instagram posting returned False")
-                            await update.message.reply_text(
-                                "❌ Failed to post to Instagram. Check logs for details.\n"
-                                "You can try again by sending another URL."
-                            )
-                            return WAITING_FOR_URL
-                    except Exception as e:
-                        # If repost fails, remove user from logged in users and ask to log in again
-                        self.logged_in_users.remove(user_id)
-                        await update.message.reply_text(
-                            f"❌ Repost failed: {str(e)}\n"
-                            "Please log in again."
-                        )
+            # Get post data
+            post_data = context.user_data.get('post_data')
+            if not post_data:
+                await update.message.reply_text(
+                    "❌ Post data not found.\n"
+                    "Please start over by sending an Instagram post URL."
+                )
+                return WAITING_FOR_URL
             
-            # If we get here, user needs to log in
-            await update.message.reply_text(
-                "✅ Caption saved!\n\n"
-                "Please send your Instagram username to proceed:"
-            )
-            return WAITING_FOR_REPOST_USERNAME
+            # Get caption
+            new_caption = update.message.text
             
+            # Upload to Instagram
+            await update.message.reply_text("⏳ Reposting to Instagram...")
+            
+            try:
+                result = self.instagram.repost_to_instagram(
+                    post_data['local_path'],
+                    new_caption,
+                    post_data['original_url']
+                )
+                
+                if result and result.get('success'):
+                    await update.message.reply_text(
+                        "✅ Successfully reposted to Instagram!\n\n"
+                        "You can send me another Instagram post URL to repost."
+                    )
+                else:
+                    await update.message.reply_text(
+                        "⚠️ Post may have been uploaded, but Instagram did not confirm it.\n"
+                        "Please check your Instagram account and try again if needed."
+                    )
+                
+                return WAITING_FOR_URL
+                
+            except Exception as e:
+                logger.error(f"Error reposting to Instagram: {e}", exc_info=True)
+                await update.message.reply_text(
+                    f"❌ Error reposting to Instagram: {str(e)}\n"
+                    "Please try again or contact support if the issue persists."
+                )
+                return WAITING_FOR_URL
+                
         except Exception as e:
-            await update.message.reply_text(
-                f"❌ An error occurred: {str(e)}\n"
-                "Please try again with /start"
-            )
-            return ConversationHandler.END
+            await update.message.reply_text(f"❌ Error: {str(e)}\nPlease try again.")
+            return WAITING_FOR_URL
     
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Cancel the conversation."""
+        """Cancel and end the conversation."""
         await update.message.reply_text(
-            "Operation cancelled.\n\n"
-            "Use /start to begin again."
+            "❌ Operation cancelled.\n"
+            "You can start over with /start."
         )
         return ConversationHandler.END
-        
+    
     async def logout(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Log out the user from their Instagram account."""
+        """Logout from Instagram."""
         user_id = update.effective_user.id
         
         if user_id in self.logged_in_users:
+            # Remove user from logged in users
             self.logged_in_users.remove(user_id)
+            
+            # Remove session data
             if user_id in self.user_sessions:
                 del self.user_sessions[user_id]
+            
+            # Remove from storage
+            self.storage.delete_credentials(user_id)
+            
+            # Logout from Instagram
+            self.instagram.logout()
             
             await update.message.reply_text(
                 "✅ You have been logged out of your Instagram account.\n\n"
@@ -528,7 +394,7 @@ class InstaBot:
         """Send a message when the command /status is issued."""
         await update.message.reply_text(
             "🔄 Bot status: Online\n"
-            "📊 Users logged in: {}\n".format(len(self.logged_in_users))
+            f"📊 Users logged in: {len(self.logged_in_users)}\n"
         )
     
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -547,6 +413,7 @@ class InstaBot:
             "/help - Show help information\n"
             "/status - Check the bot's status\n"
             "/logout - Log out from your Instagram account\n"
+            "/whoami - Show your Instagram account information\n"
             "/cancel - Cancel the current operation"
         )
     
@@ -567,14 +434,13 @@ class InstaBot:
         username = session_data.get('username', 'Unknown')
         
         logger.debug(f"Retrieved username from session: {username}")
-        logger.debug(f"User sessions: {self.user_sessions}")
         
         # Attempt to get additional account info if possible
         account_info = "No additional account information available."
         try:
-            if hasattr(self.poster, 'api') and self.poster.is_logged_in and self.poster.username == username:
+            if hasattr(self.instagram, 'client') and self.instagram.is_logged_in and self.instagram.username == username:
                 # Try to get basic account info
-                user_info = self.poster.api.username_info(username)
+                user_info = self.instagram.client.api.username_info(username)
                 if user_info and 'user' in user_info:
                     user = user_info['user']
                     account_info = (
@@ -625,9 +491,7 @@ class InstaBot:
         logger.info("Bot commands menu set up successfully")
 
     def register_handlers(self, app):
-        """Register all handlers with the application without starting polling.
-        This allows using the bot with different run methods (polling or webhook).
-        """
+        """Register all handlers with the application without starting polling."""
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', self.start)],
             states={
@@ -643,16 +507,16 @@ class InstaBot:
                     CommandHandler('whoami', self.whoami),
                 ],
                 WAITING_FOR_CAPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_caption)
-                ],
-                WAITING_FOR_REPOST_USERNAME: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_repost_username)
-                ],
-                WAITING_FOR_REPOST_PASSWORD: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_repost_password)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_caption),
+                    CommandHandler('cancel', self.cancel),
                 ]
             },
-            fallbacks=[CommandHandler('cancel', self.cancel)],
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                CommandHandler('help', self.help_command),
+                CommandHandler('logout', self.logout),
+                CommandHandler('whoami', self.whoami),
+            ],
             name="instagram_conversation"
         )
         
@@ -669,9 +533,7 @@ class InstaBot:
 
     def run(self):
         """Start the bot."""
-        # Create a unique session name with timestamp to avoid conflicts
-        import time
-        session_name = f"insta_bot_{int(time.time())}"
+        # Create application instance
         app = Application.builder().token(self.token).concurrent_updates(True).build()
         
         # Explicitly delete webhook to avoid conflicts
@@ -734,6 +596,6 @@ if __name__ == '__main__':
         web_thread.daemon = True
         web_thread.start()
     
-    # Start the Telegram bot
+    # Create and start the bot
     bot = InstaBot()
     bot.run()
