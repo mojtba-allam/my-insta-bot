@@ -16,6 +16,7 @@ from storage import StorageHandler
 import threading
 import http.server
 import socketserver
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -557,6 +558,47 @@ class InstaBot:
         print("Bot starting...")
         logging.info("Bot starting...")
         app.run_polling(poll_interval=1.0)
+        
+    async def run_async(self):
+        """Start the bot asynchronously."""
+        # Create application instance
+        app = Application.builder().token(self.token).concurrent_updates(True).build()
+        
+        # Explicitly delete webhook to avoid conflicts
+        logger.info("Deleting any existing webhook...")
+        try:
+            import requests
+            # Fix possible newline issues in token
+            clean_token = self.token.strip()
+            response = requests.get(f"https://api.telegram.org/bot{clean_token}/deleteWebhook?drop_pending_updates=true")
+            logger.info(f"Webhook deletion response: {response.json()}")
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
+        
+        # Register handlers
+        self.register_handlers(app)
+        
+        # Set up bot commands menu - properly await the coroutine
+        await self.set_commands(app)
+        
+        # Start the bot
+        print("Bot starting...")
+        logging.info("Bot starting...")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        
+        try:
+            # Keep the bot running
+            await asyncio.Event().wait()
+        except (KeyboardInterrupt, SystemExit):
+            # Handle graceful shutdown
+            logger.info("Bot shutting down...")
+        finally:
+            # Clean shutdown
+            await app.stop()
+            await app.updater.stop()
+            await app.shutdown()
     
     def _load_stored_credentials(self):
         """Load stored credentials from storage."""
@@ -600,4 +642,4 @@ if __name__ == '__main__':
     
     # Create and start the bot
     bot = InstaBot()
-    bot.run()
+    asyncio.run(bot.run_async())
