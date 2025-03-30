@@ -63,6 +63,158 @@ class InstagramManager:
             return self.client.logout()
         return True
     
+    def _extract_shortcode_from_url(self, url: str) -> str:
+        """
+        Extract the Instagram post shortcode from a URL.
+        
+        Args:
+            url (str): Instagram post URL
+            
+        Returns:
+            str: Shortcode
+        """
+        # Clean the URL first - remove any query parameters
+        url = url.split('?')[0].strip('/')
+        
+        # Handle different URL formats
+        patterns = [
+            r'instagram\.com/p/([A-Za-z0-9_-]+)',
+            r'instagram\.com/reel/([A-Za-z0-9_-]+)',
+            r'instagram\.com/tv/([A-Za-z0-9_-]+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        # If no match found
+        raise ValueError(f"Could not extract shortcode from URL: {url}")
+    
+    def get_media_info_by_shortcode(self, shortcode: str) -> Dict[str, Any]:
+        """
+        Get complete media information for an Instagram post using its shortcode.
+        Uses multiple approaches for maximum compatibility.
+        
+        Args:
+            shortcode (str): Instagram post shortcode
+            
+        Returns:
+            dict: Media information
+        """
+        # Logging for debugging
+        logger.info(f"Fetching media info for shortcode: {shortcode}")
+        
+        # Try multiple approaches to get media info
+        errors = []
+        
+        # Approach 1: Use our custom shortcode method from instagram_client
+        try:
+            media_info = self.client.get_media_by_shortcode(shortcode)
+            if media_info and media_info.get('items'):
+                logger.info("Successfully got media info using get_media_by_shortcode")
+                return media_info
+        except Exception as e:
+            error_msg = f"Error using get_media_by_shortcode: {str(e)}"
+            logger.warning(error_msg)
+            errors.append(error_msg)
+        
+        # Approach 2: Try direct web scraping as a fallback
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            import json
+            
+            # Try to fetch the page and extract JSON data
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            }
+            
+            url = f"https://www.instagram.com/p/{shortcode}/"
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                # Try to find shared data in the HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+                scripts = soup.find_all('script')
+                
+                for script in scripts:
+                    if script.string and '_sharedData = ' in script.string:
+                        json_text = script.string.split('_sharedData = ')[1].split(';</script>')[0]
+                        data = json.loads(json_text)
+                        
+                        # Extract post data from shared data
+                        post_page = data.get('entry_data', {}).get('PostPage', [{}])[0]
+                        media = post_page.get('graphql', {}).get('shortcode_media', {})
+                        
+                        if media:
+                            # Convert to format similar to API response
+                            username = media.get('owner', {}).get('username', 'unknown')
+                            caption_text = ''
+                            edges = media.get('edge_media_to_caption', {}).get('edges', [])
+                            if edges and len(edges) > 0:
+                                caption_text = edges[0].get('node', {}).get('text', '')
+                            
+                            # Construct media info in API-like format
+                            synthetic_media_info = {
+                                'items': [{
+                                    'id': media.get('id'),
+                                    'code': shortcode,
+                                    'media_type': 1 if media.get('__typename') == 'GraphImage' else 2,
+                                    'image_versions2': {
+                                        'candidates': [{'url': media.get('display_url')}]
+                                    },
+                                    'video_versions': [{'url': media.get('video_url')}] if media.get('is_video') else [],
+                                    'carousel_media': self._extract_carousel_items(media) if media.get('__typename') == 'GraphSidecar' else [],
+                                    'caption': {'text': caption_text},
+                                    'user': {
+                                        'username': username,
+                                        'full_name': media.get('owner', {}).get('full_name', ''),
+                                    }
+                                }]
+                            }
+                            
+                            logger.info("Successfully got media info using web scraping")
+                            return synthetic_media_info
+            
+            error_msg = f"Web scraping failed to extract post data: {response.status_code}"
+            logger.warning(error_msg)
+            errors.append(error_msg)
+            
+        except Exception as e:
+            error_msg = f"Error using web scraping approach: {str(e)}"
+            logger.warning(error_msg)
+            errors.append(error_msg)
+        
+        # If we reach here, all approaches failed
+        error_details = "\n".join(errors)
+        logger.error(f"All approaches to get media info failed:\n{error_details}")
+        raise Exception(f"Failed to get media info for shortcode {shortcode}")
+    
+    def _extract_carousel_items(self, media):
+        """Extract carousel items from web API response."""
+        carousel_items = []
+        edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
+        
+        for edge in edges:
+            node = edge.get('node', {})
+            item = {
+                'id': node.get('id'),
+                'media_type': 1 if node.get('__typename') == 'GraphImage' else 2,
+                'image_versions2': {
+                    'candidates': [{'url': node.get('display_url')}]
+                },
+            }
+            
+            if node.get('is_video'):
+                item['video_versions'] = [{'url': node.get('video_url')}]
+                
+            carousel_items.append(item)
+            
+        return carousel_items
+    
     def download_instagram_post(self, post_url: str, instagram_username: Optional[str] = None, 
                                instagram_password: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -80,12 +232,13 @@ class InstagramManager:
         if not self._validate_instagram_url(post_url):
             raise ValueError("Invalid Instagram URL format")
         
-        # Extract post ID or shortcode
-        post_id = self._extract_post_id(post_url)
-        if not post_id:
-            raise ValueError("Could not extract post ID from URL")
-        
-        logger.debug(f"Extracted post ID/shortcode: {post_id}")
+        # Extract shortcode directly from the URL
+        try:
+            shortcode = self._extract_shortcode_from_url(post_url)
+            logger.info(f"Extracted shortcode from URL: {shortcode}")
+        except Exception as e:
+            logger.error(f"Error extracting shortcode: {e}")
+            raise ValueError(f"Could not extract shortcode from URL: {post_url}")
         
         # Check login status and login if credentials provided
         if not self.is_logged_in and instagram_username and instagram_password:
@@ -96,95 +249,76 @@ class InstagramManager:
             raise Exception("Login required to download this post")
         
         try:
-            # Get post info - try different methods based on the ID format
-            media_info = None
-            
-            # First, try the new direct shortcode method - this should work best
-            try:
-                logger.debug(f"Trying get_media_by_shortcode with: {post_id}")
-                media_info = self.client.get_media_by_shortcode(post_id)
-                logger.debug("Successfully retrieved media info with get_media_by_shortcode")
-            except Exception as shortcode_error:
-                logger.debug(f"Error using get_media_by_shortcode: {str(shortcode_error)}")
-                
-                # Now try all the original fallback methods
-                try:
-                    # Try using media_info method (requires numeric ID)
-                    logger.debug(f"Trying media_info with: {post_id}")
-                    media_info = self.client.api.media_info(post_id)
-                except Exception as first_error:
-                    logger.debug(f"Error using media_info with ID {post_id}: {str(first_error)}")
-                    
-                    try:
-                        # Try getting media info by URL
-                        logger.debug(f"Trying media_info_by_url with: {post_url}")
-                        media_info = self.client.api.media_info_by_url(post_url)
-                    except Exception as second_error:
-                        logger.debug(f"Error using media_info_by_url: {str(second_error)}")
-                        
-                        try:
-                            # Try getting media info by shortcode
-                            logger.debug(f"Trying media_info_by_code with: {post_id}")
-                            media_info = self.client.api.media_info_by_code(post_id)
-                        except Exception as third_error:
-                            logger.debug(f"Error using media_info_by_code: {str(third_error)}")
-                            # Re-raise the original error
-                            raise first_error
+            # Get media info using our improved method
+            media_info = self.get_media_info_by_shortcode(shortcode)
             
             # Extract media data
             items = media_info.get('items', [])
             if not items:
                 raise ValueError("Post not found or is private")
             
-            post_data = items[0]
+            media_item = items[0]
             
-            # Extract media URL
-            media_url = None
-            media_type = None
+            # Get media type and URL
+            media_type = media_item.get('media_type', 1)
+            is_carousel = media_type == 8 or 'carousel_media' in media_item
+            is_video = media_type == 2 or 'video_versions' in media_item
             
-            if post_data.get('media_type') == 1:  # Photo
-                media_type = 'photo'
-                media_url = post_data.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
-            elif post_data.get('media_type') == 2:  # Video
-                media_type = 'video'
-                media_url = post_data.get('video_versions', [{}])[0].get('url')
-            elif post_data.get('media_type') == 8:  # Album/carousel
-                media_type = 'carousel'
-                # Get first item by default
-                carousel_items = post_data.get('carousel_media', [])
-                if carousel_items:
-                    first_item = carousel_items[0]
-                    if first_item.get('media_type') == 1:
-                        media_url = first_item.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
-                    elif first_item.get('media_type') == 2:
-                        media_url = first_item.get('video_versions', [{}])[0].get('url')
+            # Get post information
+            username = media_item.get('user', {}).get('username', 'unknown')
+            caption = media_item.get('caption', {}).get('text', '')
             
-            if not media_url:
-                raise ValueError("Could not extract media URL from post")
+            # Create temp directory to store downloaded files
+            download_dir = os.path.join(self.storage.get_temp_dir(), f"instagram_{shortcode}")
+            os.makedirs(download_dir, exist_ok=True)
             
-            # Download the media
-            local_path = self._download_media(media_url, post_id, media_type)
+            # Download media files
+            media_files = []
             
-            # Extract metadata
-            username = post_data.get('user', {}).get('username', 'unknown')
-            caption = post_data.get('caption', {})
-            caption_text = caption.get('text', '') if caption else ''
+            if is_carousel:
+                # Handle carousel/album
+                carousel_media = media_item.get('carousel_media', [])
+                for i, item in enumerate(carousel_media):
+                    item_type = item.get('media_type', 1)
+                    if item_type == 2 or 'video_versions' in item:  # Video
+                        video_url = item.get('video_versions', [{}])[0].get('url')
+                        if video_url:
+                            file_path = os.path.join(download_dir, f"video_{i}.mp4")
+                            self._download_file(video_url, file_path)
+                            media_files.append(file_path)
+                    else:  # Image
+                        image_url = item.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
+                        if image_url:
+                            file_path = os.path.join(download_dir, f"image_{i}.jpg")
+                            self._download_file(image_url, file_path)
+                            media_files.append(file_path)
+            elif is_video:
+                # Handle video
+                video_url = media_item.get('video_versions', [{}])[0].get('url')
+                if video_url:
+                    file_path = os.path.join(download_dir, "video.mp4")
+                    self._download_file(video_url, file_path)
+                    media_files.append(file_path)
+            else:
+                # Handle image
+                image_url = media_item.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
+                if image_url:
+                    file_path = os.path.join(download_dir, "image.jpg")
+                    self._download_file(image_url, file_path)
+                    media_files.append(file_path)
             
-            # Store post data for later use
-            self.post_data = {
-                'id': post_id,
-                'media_url': media_url,
-                'local_path': local_path,
-                'media_type': media_type,
+            # Return post metadata
+            return {
+                'shortcode': shortcode,
+                'media_id': media_item.get('id'),
                 'username': username,
-                'caption': caption_text,
-                'likes': post_data.get('like_count', 0),
-                'comments': post_data.get('comment_count', 0),
-                'timestamp': post_data.get('taken_at', 0),
-                'original_url': post_url
+                'caption': caption,
+                'media_files': media_files,
+                'local_path': download_dir,
+                'original_url': post_url,
+                'type': 'carousel' if is_carousel else 'video' if is_video else 'image',
+                'user_info': media_item.get('user', {})
             }
-            
-            return self.post_data
             
         except Exception as e:
             logger.error(f"Error downloading Instagram post: {str(e)}")
@@ -249,6 +383,124 @@ class InstagramManager:
             logger.error(f"Error reposting to Instagram: {str(e)}")
             raise
     
+    def direct_repost(self, post_url: str, new_caption: str, instagram_username: str, instagram_password: str) -> Dict[str, Any]:
+        """
+        Directly repost an Instagram post without exposing download steps to the user.
+        
+        Args:
+            post_url (str): URL of the Instagram post to repost
+            new_caption (str): New caption for the repost
+            instagram_username (str): Instagram username
+            instagram_password (str): Instagram password
+            
+        Returns:
+            dict: Result information
+        """
+        try:
+            # Log the action
+            logger.info(f"Direct repost initiated for URL: {post_url}")
+            
+            # Ensure we're logged in
+            if not self.is_logged_in:
+                self.login(instagram_username, instagram_password)
+            
+            # Extract shortcode from URL
+            shortcode = self._extract_shortcode_from_url(post_url)
+            logger.debug(f"Extracted shortcode for direct repost: {shortcode}")
+            
+            # Get post data directly from Instagram API
+            try:
+                # First try with our enhanced shortcode method
+                media_info = self.get_media_info_by_shortcode(shortcode)
+                
+                # Extract necessary info
+                items = media_info.get('items', [])
+                if not items:
+                    raise ValueError("Post not found or is private")
+                
+                item = items[0]
+                
+                # Get original caption if available and not overridden
+                if not new_caption or new_caption.lower() == "original":
+                    original_caption = item.get('caption', {}).get('text', '')
+                    new_caption = original_caption or "Reposted with InstaBot"
+                
+                # Determine media type
+                is_video = item.get('media_type') == 2 or bool(item.get('video_versions'))
+                is_carousel = item.get('media_type') == 8 or bool(item.get('carousel_media'))
+                
+                # Create a temporary directory for downloads
+                import tempfile
+                import os
+                import shutil
+                temp_dir = tempfile.mkdtemp()
+                
+                try:
+                    # Download media
+                    media_files = []
+                    
+                    if is_carousel:
+                        # Handle carousel/album
+                        carousel_items = item.get('carousel_media', [])
+                        for i, carousel_item in enumerate(carousel_items):
+                            if carousel_item.get('media_type') == 2 or bool(carousel_item.get('video_versions')):
+                                # Video in carousel
+                                video_url = carousel_item.get('video_versions', [{}])[0].get('url')
+                                if video_url:
+                                    file_path = os.path.join(temp_dir, f"carousel_video_{i}.mp4")
+                                    self._download_file(video_url, file_path)
+                                    media_files.append(file_path)
+                            else:
+                                # Image in carousel
+                                image_url = carousel_item.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
+                                if image_url:
+                                    file_path = os.path.join(temp_dir, f"carousel_image_{i}.jpg")
+                                    self._download_file(image_url, file_path)
+                                    media_files.append(file_path)
+                    elif is_video:
+                        # Handle video
+                        video_url = item.get('video_versions', [{}])[0].get('url')
+                        if video_url:
+                            file_path = os.path.join(temp_dir, "video.mp4")
+                            self._download_file(video_url, file_path)
+                            media_files.append(file_path)
+                    else:
+                        # Handle image
+                        image_url = item.get('image_versions2', {}).get('candidates', [{}])[0].get('url')
+                        if image_url:
+                            file_path = os.path.join(temp_dir, "image.jpg")
+                            self._download_file(image_url, file_path)
+                            media_files.append(file_path)
+                    
+                    if not media_files:
+                        raise ValueError("Could not download any media from the post")
+                    
+                    # Post to Instagram
+                    result = self.post_to_instagram(media_files, new_caption)
+                    
+                    # Return result
+                    return {
+                        "success": True if result else False,
+                        "url": f"https://instagram.com/{self.username}",
+                        "caption": new_caption
+                    }
+                    
+                finally:
+                    # Clean up temporary directory
+                    try:
+                        shutil.rmtree(temp_dir)
+                        logger.debug("Cleaned up temporary files after direct repost")
+                    except Exception as cleanup_error:
+                        logger.error(f"Failed to clean up temporary files: {cleanup_error}")
+                
+            except Exception as api_error:
+                logger.error(f"API error during direct repost: {api_error}")
+                return {"success": False, "error": str(api_error)}
+            
+        except Exception as e:
+            logger.error(f"Error in direct_repost: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
     def _validate_instagram_url(self, url: str) -> bool:
         """Validate that the URL is from Instagram."""
         instagram_patterns = [
@@ -261,55 +513,6 @@ class InstagramManager:
                 return True
         
         return False
-    
-    def _extract_post_id(self, url: str) -> Optional[str]:
-        """Extract post ID from Instagram URL."""
-        # First clean up the URL by removing query parameters
-        if '?' in url:
-            url = url.split('?')[0]
-        
-        # Try to extract the shortcode from the URL
-        patterns = [
-            r'instagram\.com/p/([a-zA-Z0-9_-]+)',
-            r'instagram\.com/reel/([a-zA-Z0-9_-]+)'
-        ]
-        
-        shortcode = None
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                shortcode = match.group(1)
-                break
-        
-        if not shortcode:
-            return None
-        
-        # Convert the shortcode to a numeric ID - Instagram API expects numeric IDs
-        try:
-            # If we have an authenticated client, use the media_id_to_code method in reverse
-            if hasattr(self, 'client') and self.client.is_logged_in:
-                # First try using API to get info directly with shortcode
-                try:
-                    media_info = self.client.api.media_info_by_url(url)
-                    if media_info and 'items' in media_info and media_info['items']:
-                        return str(media_info['items'][0]['id'])
-                except Exception as e:
-                    logger.debug(f"Could not get media info by URL, trying shortcode: {e}")
-                
-                # Try using the internal method to convert shortcode to media_id
-                try:
-                    # This is a hacky way to access the private method
-                    from instagram_private_api.compatpatch import ClientCompatPatch
-                    media_id = ClientCompatPatch.media_id(shortcode)
-                    return media_id
-                except Exception as e:
-                    logger.debug(f"Could not convert shortcode to media_id: {e}")
-            
-            # If all else fails, return the shortcode itself
-            return shortcode  # Return the shortcode as fallback
-        except Exception as e:
-            logger.error(f"Error extracting numeric post ID: {str(e)}")
-            return shortcode  # Return the shortcode as fallback
     
     def _download_media(self, url: str, post_id: str, media_type: str) -> str:
         """
@@ -403,3 +606,20 @@ class InstagramManager:
             logger.error(f"Error processing image: {str(e)}")
             # If processing fails, return the original path
             return image_path
+    
+    def _download_file(self, url: str, file_path: str):
+        """
+        Download a file from a URL and save it to a local path.
+        
+        Args:
+            url (str): URL of the file
+            file_path (str): Local path to save the file
+        """
+        response = requests.get(url, stream=True)
+        if response.status_code == 200:
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+            logger.info(f"Downloaded file to {file_path}")
+        else:
+            raise Exception(f"Failed to download file: {response.status_code}")
