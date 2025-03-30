@@ -37,7 +37,9 @@ logger.addHandler(console_handler)
 
 # States
 (WAITING_FOR_URL, WAITING_FOR_USERNAME, WAITING_FOR_PASSWORD,
- WAITING_FOR_CAPTION) = range(4)
+ WAITING_FOR_CAPTION, WAITING_FOR_URL_REPOST, WAITING_FOR_CAPTION_REPOST,
+ WAITING_FOR_DIRECT_REPOST_URL, WAITING_FOR_DIRECT_REPOST_CAPTION,
+ WAITING_FOR_PREVIEW_URL, WAITING_FOR_PREVIEW_CONFIRMATION) = range(10)
 
 class InstaBot:
     """
@@ -292,7 +294,9 @@ class InstaBot:
             password = update.message.text
             
             if not username:
-                await update.message.reply_text("❌ Session expired. Please start over with /start")
+                await update.message.reply_text(
+                    "❌ Session expired. Please start over with /start"
+                )
                 return ConversationHandler.END
             
             await update.message.reply_text("🔄 Logging in to Instagram...")
@@ -577,7 +581,10 @@ class InstaBot:
             ('whoami', 'Show your Instagram account information'),
             ('logout', 'Log out from your Instagram account'),
             ('status', 'Check the bot status'),
-            ('cancel', 'Cancel the current operation')
+            ('cancel', 'Cancel the current operation'),
+            ('repost', 'Repost an Instagram post directly'),
+            ('directrepost', 'Directly repost an Instagram post without showing download steps'),
+            ('previewrepost', 'Preview an Instagram post before reposting')
         ]
         
         await app.bot.set_my_commands(commands)
@@ -602,6 +609,24 @@ class InstaBot:
                 WAITING_FOR_CAPTION: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_caption),
                     CommandHandler('cancel', self.cancel),
+                ],
+                WAITING_FOR_URL_REPOST: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_repost_url)
+                ],
+                WAITING_FOR_CAPTION_REPOST: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_repost_caption)
+                ],
+                WAITING_FOR_DIRECT_REPOST_URL: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_direct_repost_url)
+                ],
+                WAITING_FOR_DIRECT_REPOST_CAPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_direct_repost_caption)
+                ],
+                WAITING_FOR_PREVIEW_URL: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_preview_url)
+                ],
+                WAITING_FOR_PREVIEW_CONFIRMATION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_preview_confirmation)
                 ]
             },
             fallbacks=[
@@ -618,6 +643,9 @@ class InstaBot:
         app.add_handler(CommandHandler("status", self.status))
         app.add_handler(CommandHandler("logout", self.logout))
         app.add_handler(CommandHandler("whoami", self.whoami))
+        app.add_handler(CommandHandler("repost", self.repost_command))
+        app.add_handler(CommandHandler("directrepost", self.direct_repost_command))
+        app.add_handler(CommandHandler("previewrepost", self.preview_repost_command))
         
         # Add a global fallback handler for messages not caught by other handlers
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.fallback_handler))
@@ -756,6 +784,414 @@ class InstaBot:
                     self.logged_in_users.add(user_id)
         except Exception as e:
             logging.error(f"Failed to load stored credentials: {e}")
+
+    async def repost_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Command handler for starting the repost process."""
+        user_id = update.effective_user.id
+        
+        # Check if user is logged in to Instagram
+        username = self.user_sessions.get(user_id, {}).get('username')
+        password = self.user_sessions.get(user_id, {}).get('password')
+        
+        if not username or not password:
+            await update.message.reply_text(
+                "🔐 You need to log in to Instagram first.\n\n"
+                "Use /start to log in to your Instagram account."
+            )
+            return ConversationHandler.END
+        
+        # Ask for the Instagram URL
+        await update.message.reply_text(
+            "📱 *Instagram Repost*\n\n"
+            "Please send me the URL of the Instagram post you want to repost.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Store the username and password in context for later use
+        context.user_data['instagram_username'] = username
+        context.user_data['instagram_password'] = password
+        
+        return WAITING_FOR_URL_REPOST
+    
+    async def handle_repost_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process Instagram URL for reposting."""
+        message_text = update.message.text.strip()
+        
+        # Check if it's a valid Instagram URL
+        if not self._is_instagram_url(message_text):
+            await update.message.reply_text(
+                "That doesn't look like an Instagram URL. Please send a valid Instagram post URL."
+            )
+            return WAITING_FOR_URL_REPOST
+        
+        # Store URL in context for later use
+        context.user_data['repost_url'] = message_text
+        
+        # Ask for caption
+        await update.message.reply_text(
+            "✏️ Now, please send me the caption you want to use for the repost.\n\n"
+            "Or send /original to use the original caption."
+        )
+        
+        return WAITING_FOR_CAPTION_REPOST
+    
+    async def handle_repost_caption(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process caption for reposting."""
+        user_id = update.effective_user.id
+        
+        # Get the URL from context
+        post_url = context.user_data.get('repost_url')
+        if not post_url:
+            await update.message.reply_text("⚠️ Something went wrong. Please start over with /repost.")
+            return ConversationHandler.END
+        
+        # Get Instagram credentials
+        username = context.user_data.get('instagram_username')
+        password = context.user_data.get('instagram_password')
+        
+        if not username or not password:
+            await update.message.reply_text(
+                "🔐 You need to log in to Instagram first.\n\n"
+                "Use /start to log in to your Instagram account."
+            )
+            return ConversationHandler.END
+        
+        # Get the caption from the message or use original
+        caption = None
+        if update.message.text.strip().lower() == "/original":
+            caption = "original"
+        else:
+            caption = update.message.text.strip()
+        
+        # Send processing message
+        processing_message = await update.message.reply_text(
+            "⏳ Processing your repost request...\n"
+            "This may take a moment as I fetch and prepare the content."
+        )
+        
+        try:
+            # Download the post (this happens in the background)
+            post_data = self.instagram_manager.download_instagram_post(post_url, username, password)
+            
+            # If user requested to use original caption and we have it
+            if caption is None and post_data.get('caption'):
+                caption = post_data.get('caption')
+            elif caption is None:
+                caption = "Reposted with InstaBot"
+            
+            # Update processing message
+            await processing_message.edit_text("⏳ Reposting to Instagram... This may take a moment.")
+            
+            # Repost to Instagram
+            result = self.instagram_manager.repost_to_instagram(
+                post_data['local_path'],
+                caption,
+                post_data['original_url']
+            )
+            
+            if result.get('success'):
+                # Get the URL of the new post if available
+                new_post_url = result.get('url', 'your Instagram profile')
+                
+                await processing_message.edit_text(
+                    f"✅ Successfully reposted to Instagram!\n\n"
+                    f"Check it out at: {new_post_url}"
+                )
+            else:
+                await processing_message.edit_text(
+                    f"❌ Failed to repost: {result.get('error', 'Unknown error')}\n\n"
+                    "Please try again later."
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in repost process: {str(e)}")
+            await processing_message.edit_text(
+                f"❌ Error: {str(e)}\n\n"
+                "Please try again or contact support if the issue persists."
+            )
+        
+        return ConversationHandler.END
+
+    async def direct_repost_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Command handler for starting the direct repost process without showing download steps."""
+        user_id = update.effective_user.id
+        
+        # Check if user is logged in to Instagram
+        username = self.user_sessions.get(user_id, {}).get('username')
+        password = self.user_sessions.get(user_id, {}).get('password')
+        
+        if not username or not password:
+            await update.message.reply_text(
+                "🔐 You need to log in to Instagram first.\n\n"
+                "Use /start to log in to your Instagram account."
+            )
+            return ConversationHandler.END
+        
+        # Ask for the Instagram URL
+        await update.message.reply_text(
+            "📱 *Direct Instagram Repost*\n\n"
+            "Please send me the URL of the Instagram post you want to repost.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Store the username and password in context for later use
+        context.user_data['instagram_username'] = username
+        context.user_data['instagram_password'] = password
+        
+        return WAITING_FOR_DIRECT_REPOST_URL
+    
+    async def handle_direct_repost_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process Instagram URL for direct reposting."""
+        message_text = update.message.text.strip()
+        
+        # Check if it's a valid Instagram URL
+        if not self._is_instagram_url(message_text):
+            await update.message.reply_text(
+                "That doesn't look like an Instagram URL. Please send a valid Instagram post URL."
+            )
+            return WAITING_FOR_DIRECT_REPOST_URL
+        
+        # Store URL in context for later use
+        context.user_data['direct_repost_url'] = message_text
+        
+        # Ask for caption
+        await update.message.reply_text(
+            "✏️ Now, please send me the caption you want to use for the repost.\n\n"
+            "Or send /original to use the original caption."
+        )
+        
+        return WAITING_FOR_DIRECT_REPOST_CAPTION
+    
+    async def handle_direct_repost_caption(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process caption for direct reposting."""
+        user_id = update.effective_user.id
+        
+        # Get the URL from context
+        post_url = context.user_data.get('direct_repost_url')
+        if not post_url:
+            await update.message.reply_text("⚠️ Something went wrong. Please start over with /directrepost.")
+            return ConversationHandler.END
+        
+        # Get Instagram credentials
+        username = context.user_data.get('instagram_username')
+        password = context.user_data.get('instagram_password')
+        
+        if not username or not password:
+            await update.message.reply_text(
+                "🔐 You need to log in to Instagram first.\n\n"
+                "Use /start to log in to your Instagram account."
+            )
+            return ConversationHandler.END
+        
+        # Get the caption from the message or use original
+        caption = None
+        if update.message.text.strip().lower() == "/original":
+            caption = "original"
+        else:
+            caption = update.message.text.strip()
+        
+        # Send processing message
+        processing_message = await update.message.reply_text(
+            "⏳ Reposting directly to Instagram...\n"
+            "This may take a moment as I process your request."
+        )
+        
+        try:
+            # Use the direct repost method to handle everything in one step
+            result = self.instagram_manager.direct_repost(
+                post_url=post_url,
+                new_caption=caption,
+                instagram_username=username,
+                instagram_password=password
+            )
+            
+            if result.get('success'):
+                # Get the URL of the new post if available
+                new_post_url = result.get('url', 'your Instagram profile')
+                
+                await processing_message.edit_text(
+                    f"✅ Successfully reposted to Instagram!\n\n"
+                    f"Check it out at: {new_post_url}"
+                )
+            else:
+                await processing_message.edit_text(
+                    f"❌ Failed to repost: {result.get('error', 'Unknown error')}\n\n"
+                    "Please try again later."
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in direct repost process: {str(e)}")
+            await processing_message.edit_text(
+                f"❌ Error: {str(e)}\n\n"
+                "Please try again or contact support if the issue persists."
+            )
+        
+        return ConversationHandler.END
+
+    async def preview_repost_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Command handler to preview post data before reposting."""
+        user_id = update.effective_user.id
+        
+        # Check if user is logged in to Instagram
+        username = self.user_sessions.get(user_id, {}).get('username')
+        password = self.user_sessions.get(user_id, {}).get('password')
+        
+        if not username or not password:
+            await update.message.reply_text(
+                "🔐 You need to log in to Instagram first.\n\n"
+                "Use /start to log in to your Instagram account."
+            )
+            return ConversationHandler.END
+        
+        # Ask for the Instagram URL
+        await update.message.reply_text(
+            "📱 *Preview Instagram Repost*\n\n"
+            "Please send me the URL of the Instagram post you want to preview and repost.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Store the username and password in context for later use
+        context.user_data['instagram_username'] = username
+        context.user_data['instagram_password'] = password
+        
+        return WAITING_FOR_PREVIEW_URL
+    
+    async def handle_preview_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process Instagram URL for previewing before repost."""
+        message_text = update.message.text.strip()
+        
+        # Check if it's a valid Instagram URL
+        if not self._is_instagram_url(message_text):
+            await update.message.reply_text(
+                "That doesn't look like an Instagram URL. Please send a valid Instagram post URL."
+            )
+            return WAITING_FOR_PREVIEW_URL
+        
+        # Store URL in context for later use
+        context.user_data['preview_url'] = message_text
+        
+        # Get Instagram credentials from context
+        username = context.user_data.get('instagram_username')
+        password = context.user_data.get('instagram_password')
+        
+        # Send processing message
+        processing_message = await update.message.reply_text(
+            "⏳ Downloading post details for preview...\n"
+            "This may take a moment."
+        )
+        
+        try:
+            # Download the post to get its details
+            post_data = self.instagram_manager.download_instagram_post(message_text, username, password)
+            
+            # Store post data for later use
+            context.user_data['preview_post_data'] = post_data
+            
+            # Get post details
+            post_author = post_data.get('username', 'Unknown')
+            post_caption = post_data.get('caption', 'No caption')
+            post_type = post_data.get('type', 'post')
+            media_count = len(post_data.get('media_files', []))
+            
+            # Format preview message
+            preview_message = (
+                f"📱 *Instagram Post Preview*\n\n"
+                f"👤 *Author:* {self._escape_markdown(post_author)}\n"
+                f"📝 *Caption:* {self._escape_markdown(post_caption[:500])}"
+            )
+            
+            if len(post_caption) > 500:
+                preview_message += f"... _(caption truncated)_"
+            
+            preview_message += f"\n\n📦 *Media:* {media_count} {'files' if media_count > 1 else 'file'} ({post_type})"
+            
+            # Update the processing message with the preview
+            await processing_message.edit_text(
+                preview_message,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+            # Send the media files for preview
+            await self._send_media_files(update, post_data.get('media_files', []), None, {'username': post_author})
+            
+            # Ask for confirmation
+            await update.message.reply_text(
+                "Do you want to repost this content?\n\n"
+                "1. Send a new caption to repost with your custom caption\n"
+                "2. Send /original to repost with the original caption\n"
+                "3. Send /cancel to cancel the repost"
+            )
+            
+            return WAITING_FOR_PREVIEW_CONFIRMATION
+            
+        except Exception as e:
+            logger.error(f"Error downloading post for preview: {str(e)}")
+            await processing_message.edit_text(
+                f"❌ Error: {str(e)}\n\n"
+                "Please try again or contact support if the issue persists."
+            )
+            return ConversationHandler.END
+    
+    async def handle_preview_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Process confirmation and caption for previewed repost."""
+        user_id = update.effective_user.id
+        user_response = update.message.text.strip()
+        
+        # Check if user wants to cancel
+        if user_response.lower() == "/cancel":
+            await update.message.reply_text("✅ Repost canceled.")
+            return ConversationHandler.END
+        
+        # Get post data from context
+        post_data = context.user_data.get('preview_post_data')
+        if not post_data:
+            await update.message.reply_text("⚠️ Post data not found. Please start over with /previewrepost.")
+            return ConversationHandler.END
+        
+        # Determine caption
+        caption = None
+        if user_response.lower() == "/original":
+            caption = post_data.get('caption', "Reposted with InstaBot")
+        else:
+            caption = user_response
+        
+        # Send processing message
+        repost_message = await update.message.reply_text("⏳ Reposting to Instagram...")
+        
+        try:
+            # Get Instagram credentials
+            username = context.user_data.get('instagram_username')
+            password = context.user_data.get('instagram_password')
+            
+            # Repost to Instagram
+            result = self.instagram_manager.repost_to_instagram(
+                post_data['local_path'],
+                caption,
+                post_data['original_url']
+            )
+            
+            if result.get('success'):
+                # Get the URL of the new post if available
+                new_post_url = result.get('url', 'your Instagram profile')
+                
+                await repost_message.edit_text(
+                    f"✅ Successfully reposted to Instagram!\n\n"
+                    f"Check it out at: {new_post_url}"
+                )
+            else:
+                await repost_message.edit_text(
+                    f"❌ Failed to repost: {result.get('error', 'Unknown error')}\n\n"
+                    "Please try again later."
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in repost process after preview: {str(e)}")
+            await repost_message.edit_text(
+                f"❌ Error: {str(e)}\n\n"
+                "Please try again or contact support if the issue persists."
+            )
+        
+        return ConversationHandler.END
 
 # Simple HTTP request handler for Render
 class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
