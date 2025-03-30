@@ -219,6 +219,90 @@ class MobileInstagramClient:
             logger.error(f"Failed to upload photo: {str(e)}")
             raise
     
+    def get_media_by_shortcode(self, shortcode):
+        """
+        Get media information using a shortcode.
+        
+        This is a wrapper around the private API to make it more accessible.
+        
+        Args:
+            shortcode (str): Instagram post shortcode (from URL)
+            
+        Returns:
+            dict: Media information or None
+        """
+        if not self.is_logged_in or not self.api:
+            raise Exception("You must be logged in to get media information")
+        
+        try:
+            # Some versions of the API have a direct media_info_by_code method
+            try:
+                return self.api.media_info_by_code(shortcode)
+            except AttributeError:
+                # Fall back to documented method
+                pass
+            
+            # Use the documented endpoint
+            try:
+                # Try to use the direct media info endpoint
+                return self.api.media_info2(shortcode)
+            except (AttributeError, Exception) as e:
+                logger.debug(f"Error with media_info2: {e}")
+            
+            # Try to fetch user feed and search for the post
+            # First get the information directly using Instagram's web API
+            import requests
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            url = f'https://www.instagram.com/p/{shortcode}/'
+            
+            try:
+                resp = requests.get(url, headers=headers)
+                
+                # Search for JSON data in the response
+                import re
+                import json
+                json_data = re.search(r'<script[^>]*>window\._sharedData\s*=\s*(.*?);</script>', resp.text)
+                if json_data:
+                    data = json.loads(json_data.group(1))
+                    media_data = data.get('entry_data', {}).get('PostPage', [{}])[0].get('graphql', {}).get('shortcode_media', {})
+                    
+                    if media_data:
+                        # Convert to format similar to API response
+                        return {
+                            'items': [{
+                                'id': media_data.get('id'),
+                                'media_type': 1 if media_data.get('__typename') == 'GraphImage' else 2,
+                                'image_versions2': {
+                                    'candidates': [{'url': media_data.get('display_url')}]
+                                },
+                                'video_versions': [{'url': media_data.get('video_url')}] if media_data.get('is_video') else [],
+                                'user': {
+                                    'username': media_data.get('owner', {}).get('username'),
+                                    'full_name': media_data.get('owner', {}).get('full_name'),
+                                },
+                                'caption': {'text': media_data.get('edge_media_to_caption', {}).get('edges', [{}])[0].get('node', {}).get('text', '')},
+                                'like_count': media_data.get('edge_media_preview_like', {}).get('count', 0),
+                                'comment_count': media_data.get('edge_media_to_comment', {}).get('count', 0),
+                                'taken_at': media_data.get('taken_at_timestamp', 0)
+                            }]
+                        }
+            except Exception as web_error:
+                logger.error(f"Error fetching media from web API: {web_error}")
+            
+            # Try one more approach - this is a fallback that might work with some API versions
+            endpoint = f'media/{shortcode}/info/'
+            return self.api._call_api(endpoint)
+        
+        except Exception as e:
+            logger.error(f"Error in get_media_by_shortcode: {str(e)}")
+            raise
+    
     def logout(self):
         """Logout from Instagram."""
         if self.api and self.is_logged_in:

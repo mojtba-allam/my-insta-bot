@@ -99,25 +99,37 @@ class InstagramManager:
             # Get post info - try different methods based on the ID format
             media_info = None
             
+            # First, try the new direct shortcode method - this should work best
             try:
-                # Try using media_info method (requires numeric ID)
-                media_info = self.client.api.media_info(post_id)
-            except Exception as first_error:
-                logger.debug(f"Error using media_info with ID {post_id}: {str(first_error)}")
+                logger.debug(f"Trying get_media_by_shortcode with: {post_id}")
+                media_info = self.client.get_media_by_shortcode(post_id)
+                logger.debug("Successfully retrieved media info with get_media_by_shortcode")
+            except Exception as shortcode_error:
+                logger.debug(f"Error using get_media_by_shortcode: {str(shortcode_error)}")
                 
+                # Now try all the original fallback methods
                 try:
-                    # Try getting media info by URL
-                    media_info = self.client.api.media_info_by_url(post_url)
-                except Exception as second_error:
-                    logger.debug(f"Error using media_info_by_url: {str(second_error)}")
+                    # Try using media_info method (requires numeric ID)
+                    logger.debug(f"Trying media_info with: {post_id}")
+                    media_info = self.client.api.media_info(post_id)
+                except Exception as first_error:
+                    logger.debug(f"Error using media_info with ID {post_id}: {str(first_error)}")
                     
                     try:
-                        # Try getting media info by shortcode
-                        media_info = self.client.api.media_info_by_code(post_id)
-                    except Exception as third_error:
-                        logger.debug(f"Error using media_info_by_code: {str(third_error)}")
-                        # Re-raise the original error
-                        raise first_error
+                        # Try getting media info by URL
+                        logger.debug(f"Trying media_info_by_url with: {post_url}")
+                        media_info = self.client.api.media_info_by_url(post_url)
+                    except Exception as second_error:
+                        logger.debug(f"Error using media_info_by_url: {str(second_error)}")
+                        
+                        try:
+                            # Try getting media info by shortcode
+                            logger.debug(f"Trying media_info_by_code with: {post_id}")
+                            media_info = self.client.api.media_info_by_code(post_id)
+                        except Exception as third_error:
+                            logger.debug(f"Error using media_info_by_code: {str(third_error)}")
+                            # Re-raise the original error
+                            raise first_error
             
             # Extract media data
             items = media_info.get('items', [])
@@ -294,7 +306,7 @@ class InstagramManager:
                     logger.debug(f"Could not convert shortcode to media_id: {e}")
             
             # If all else fails, return the shortcode itself
-            return shortcode
+            return shortcode  # Return the shortcode as fallback
         except Exception as e:
             logger.error(f"Error extracting numeric post ID: {str(e)}")
             return shortcode  # Return the shortcode as fallback
