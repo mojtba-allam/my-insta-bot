@@ -1,33 +1,64 @@
 # Virtual environment
 venv/
+env/
+.venv/
+.env/
 
-# Python cache
+# Python cache files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Environment variables
+# Environment variables and secrets
 .env
+*.env
+.flaskenv
+*.pem
 
 # System files
 .DS_Store
+Thumbs.db
+desktop.ini
 
-# Instagram session files
+# Instagram session and user data
+sessions/
 *.session
 *.session-journal
+downloads/
 
-# Data directory
+# Data directories
 data/
-*.json
+media/
+backup/
+extra_backup/
 
-# Google Drive credentials
-credentials.json
-token.json
-service-account.json
+# Google Drive credentials (but keep templates)
+credentials*.json
+token*.json
+service-account*.json
+!credentials_template.json
 
 # Temporary files
 temp_*
 *.temp
 *.tmp
+.ipynb_checkpoints
 
 # Logs
 *.log
+logs/
+
+# Debug files
+debug_*.py
+test_*.py
+*_debug.py
+*_test.py
+
+# Specific files we don't need in the repo
+token_base64.txt
+mongodb*.txt
+*.sqlite
+*.db
